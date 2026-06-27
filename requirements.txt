@@ -1,0 +1,23 @@
+# Core
+anthropic
+exa-py
+httpx
+
+# Document parsing
+llama-parse
+beautifulsoup4
+pandas
+openpyxl
+
+# Database
+psycopg2-binary
+sqlalchemy
+
+# Storage
+boto3
+
+# Review UI
+streamlit
+
+# Utilities
+python-dotenv
