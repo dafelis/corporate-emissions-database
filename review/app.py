@@ -5,6 +5,10 @@ Run with: streamlit run review/app.py
 """
 
 import os
+import sys
+
+# Ensure the project root is on the Python path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pandas as pd
 import streamlit as st
