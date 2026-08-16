@@ -179,16 +179,18 @@ def run_pipeline(
     session.commit()
 
     errors = []
+    n_success = 0
+    n_failed = 0
 
     for i, company in enumerate(companies):
         log.info(f"[{i + 1}/{len(companies)}] {company.name}")
         try:
             result = process_company(company, anthropic_key, exa_key, llama_key, session)
-            run.successful += 1
+            n_success += 1
         except Exception as e:
             log.error(f"  FAILED: {e}")
             errors.append(f"{company.name}: {e}")
-            run.failed += 1
+            n_failed += 1
             session.rollback()
 
         # Rate limiting
@@ -197,8 +199,12 @@ def run_pipeline(
 
         # Update run record periodically
         if (i + 1) % 10 == 0:
+            run.successful = n_success
+            run.failed = n_failed
             session.commit()
 
+    run.successful = n_success
+    run.failed = n_failed
     run.completed_at = datetime.utcnow()
     run.status = "completed"
     run.error_log = "\n".join(errors) if errors else None

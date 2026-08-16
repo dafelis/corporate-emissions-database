@@ -55,20 +55,40 @@ def search_for_emissions_source(
                     "Strongly prefer PDF sustainability reports, annual reports, ESG reports, "
                     "and CDP disclosures over general web pages or news articles. "
                     "Prefer reports from the parent/group company rather than subsidiaries. "
-                    "Include only results with a reasonable chance of containing the data.\n"
-                    'Reply with JSON only: {"ranked": [{"url": "<url>", "title": "<title>"}, ...]}'
+                    "Include only results with a reasonable chance of containing the data."
                 ),
             }
         ],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "ranked": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "url": {"type": "string"},
+                                    "title": {"type": "string"},
+                                },
+                                "required": ["url", "title"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["ranked"],
+                    "additionalProperties": False,
+                },
+            }
+        },
     )
 
-    raw = response_msg.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-
-    parsed = json.loads(raw.strip())
+    text = next((b.text for b in response_msg.content if b.type == "text"), None)
+    if text is None:
+        raise ValueError("Claude returned no text response.")
+    parsed = json.loads(text)
     ranked = parsed.get("ranked", [])
 
     if not ranked:
