@@ -48,19 +48,21 @@ def cmd_init(args):
     create_tables(config["DATABASE_URL"])
 
     # Add new LEI columns if they don't exist (migration for existing databases)
+    from sqlalchemy import text
     from db.models import get_engine
     engine = get_engine(config["DATABASE_URL"])
-    with engine.connect() as conn:
-        for col, coltype in [
-            ("lei_legal_name", "VARCHAR(500)"),
-            ("lei_country", "VARCHAR(10)"),
-            ("lei_confidence", "VARCHAR(20)"),
-            ("lei_flag_reason", "TEXT"),
-            ("lei_review_status", "VARCHAR(20) DEFAULT 'pending'"),
-        ]:
+    for col, coltype in [
+        ("lei_legal_name", "VARCHAR(500)"),
+        ("lei_country", "VARCHAR(10)"),
+        ("lei_confidence", "VARCHAR(20)"),
+        ("lei_flag_reason", "TEXT"),
+        ("lei_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+    ]:
+        with engine.connect() as conn:
             try:
-                conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {coltype}")
+                conn.execute(text(f"ALTER TABLE companies ADD COLUMN {col} {coltype}"))
                 conn.commit()
+                print(f"  Added column: {col}")
             except Exception:
                 conn.rollback()  # column already exists
 
