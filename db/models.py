@@ -20,7 +20,12 @@ class Company(Base):
     name = Column(String(500), nullable=False)
     ticker = Column(String(20))
     lei = Column(String(20), unique=True)
-    index_membership = Column(String(50))  # e.g. "FTSE100"
+    lei_legal_name = Column(String(500))     # legal name returned by GLEIF
+    lei_country = Column(String(10))          # country code from GLEIF
+    lei_confidence = Column(String(20))       # high / medium / low
+    lei_flag_reason = Column(Text)            # why it was flagged (if applicable)
+    lei_review_status = Column(String(20), default="pending")  # pending / approved / rejected
+    index_membership = Column(String(50))     # e.g. "FTSE100"
     created_at = Column(DateTime, default=datetime.utcnow)
 
     emissions = relationship("EmissionsRecord", back_populates="company")

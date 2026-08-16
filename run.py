@@ -47,6 +47,23 @@ def cmd_init(args):
     print("Creating database tables...")
     create_tables(config["DATABASE_URL"])
 
+    # Add new LEI columns if they don't exist (migration for existing databases)
+    from db.models import get_engine
+    engine = get_engine(config["DATABASE_URL"])
+    with engine.connect() as conn:
+        for col, coltype in [
+            ("lei_legal_name", "VARCHAR(500)"),
+            ("lei_country", "VARCHAR(10)"),
+            ("lei_confidence", "VARCHAR(20)"),
+            ("lei_flag_reason", "TEXT"),
+            ("lei_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {coltype}")
+                conn.commit()
+            except Exception:
+                conn.rollback()  # column already exists
+
     session = get_session(config["DATABASE_URL"])
     existing = {c.name for c in session.query(Company).all()}
 
@@ -57,15 +74,15 @@ def cmd_init(args):
             continue
 
         # Look up LEI
-        lei = None
-        lei_name = None
+        lei_result = None
         if not args.skip_lei:
             try:
-                result = lookup_lei(entry["name"])
-                if result:
-                    lei = result["lei"]
-                    lei_name = result["legal_name"]
-                    print(f"  {entry['name']} -> LEI: {lei} ({lei_name})")
+                lei_result = lookup_lei(entry["name"])
+                if lei_result:
+                    flag = f" ⚑ {lei_result['flag_reason']}" if lei_result.get("flag_reason") else ""
+                    print(f"  {entry['name']} -> LEI: {lei_result['lei']} "
+                          f"({lei_result['legal_name']}, {lei_result['country']}) "
+                          f"[{lei_result['confidence']}]{flag}")
                 else:
                     print(f"  {entry['name']} -> LEI not found")
             except Exception as e:
@@ -74,7 +91,12 @@ def cmd_init(args):
         company = Company(
             name=entry["name"],
             ticker=entry.get("ticker"),
-            lei=lei,
+            lei=lei_result["lei"] if lei_result else None,
+            lei_legal_name=lei_result["legal_name"] if lei_result else None,
+            lei_country=lei_result["country"] if lei_result else None,
+            lei_confidence=lei_result["confidence"] if lei_result else None,
+            lei_flag_reason=lei_result.get("flag_reason") if lei_result else None,
+            lei_review_status="approved" if lei_result and lei_result["confidence"] == "high" else "pending",
             index_membership="FTSE100",
         )
         session.add(company)
@@ -93,7 +115,17 @@ def cmd_init(args):
                     result = lookup_lei(company.name)
                     if result:
                         company.lei = result["lei"]
-                        print(f"  {company.name} -> LEI: {result['lei']} ({result['legal_name']})")
+                        company.lei_legal_name = result["legal_name"]
+                        company.lei_country = result["country"]
+                        company.lei_confidence = result["confidence"]
+                        company.lei_flag_reason = result.get("flag_reason")
+                        company.lei_review_status = (
+                            "approved" if result["confidence"] == "high" else "pending"
+                        )
+                        flag = f" ⚑ {result['flag_reason']}" if result.get("flag_reason") else ""
+                        print(f"  {company.name} -> LEI: {result['lei']} "
+                              f"({result['legal_name']}, {result['country']}) "
+                              f"[{result['confidence']}]{flag}")
                     else:
                         print(f"  {company.name} -> LEI not found")
                 except Exception as e:

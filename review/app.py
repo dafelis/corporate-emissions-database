@@ -173,7 +173,22 @@ with col2:
         st.metric("Confidence", f"{color} {score}/100")
 
     st.markdown("**LEI**")
-    st.write(company.lei or "Not found")
+    if company.lei:
+        lei_conf = company.lei_confidence or "unknown"
+        if lei_conf == "high":
+            lei_icon = "🟢"
+        elif lei_conf == "medium":
+            lei_icon = "🟡"
+        else:
+            lei_icon = "🔴"
+        st.write(f"{lei_icon} {company.lei}")
+        st.caption(f"GLEIF name: {company.lei_legal_name or '—'}")
+        st.caption(f"Country: {company.lei_country or '—'}")
+        st.caption(f"Status: {company.lei_review_status or 'pending'}")
+        if company.lei_flag_reason:
+            st.warning(company.lei_flag_reason)
+    else:
+        st.write("Not found")
 
 # --- Review actions ---
 st.markdown("---")
