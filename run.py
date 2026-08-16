@@ -83,6 +83,24 @@ def cmd_init(args):
     session.commit()
     print(f"\nAdded {added} companies to database ({len(existing)} already existed)")
 
+    # Backfill LEIs for existing companies that don't have one
+    if not args.skip_lei:
+        no_lei = session.query(Company).filter(Company.lei.is_(None)).all()
+        if no_lei:
+            print(f"\nBackfilling LEIs for {len(no_lei)} companies...")
+            for company in no_lei:
+                try:
+                    result = lookup_lei(company.name)
+                    if result:
+                        company.lei = result["lei"]
+                        print(f"  {company.name} -> LEI: {result['lei']} ({result['legal_name']})")
+                    else:
+                        print(f"  {company.name} -> LEI not found")
+                except Exception as e:
+                    print(f"  {company.name} -> LEI lookup failed: {e}")
+            session.commit()
+            print("LEI backfill complete")
+
 
 def cmd_extract(args):
     """Run the extraction pipeline."""
