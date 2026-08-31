@@ -196,6 +196,35 @@ def cmd_status(args):
         print(f"  Success/Failed/Skipped: {last_run.successful}/{last_run.failed}/{last_run.skipped}")
 
 
+def cmd_reset(args):
+    """Delete emissions data for a company (so it can be re-extracted)."""
+    config = get_config()
+
+    from db.models import get_session, Company, EmissionsRecord, Source
+
+    session = get_session(config["DATABASE_URL"])
+
+    if args.id:
+        company = session.query(Company).get(args.id)
+        if not company:
+            print(f"Company with ID {args.id} not found")
+            sys.exit(1)
+        companies = [company]
+    elif args.all:
+        companies = session.query(Company).all()
+    else:
+        print("Specify --id <company_id> or --all")
+        sys.exit(1)
+
+    for company in companies:
+        n_records = session.query(EmissionsRecord).filter_by(company_id=company.id).delete()
+        n_sources = session.query(Source).filter_by(company_id=company.id).delete()
+        print(f"  {company.name}: deleted {n_records} records, {n_sources} sources")
+
+    session.commit()
+    print("Reset complete")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Corporate Emissions Database Pipeline")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
@@ -216,6 +245,11 @@ def main():
     # status
     subparsers.add_parser("status", help="Show database status")
 
+    # reset
+    reset_parser = subparsers.add_parser("reset", help="Delete emissions data for re-extraction")
+    reset_parser.add_argument("--id", type=int, help="Reset a single company by ID")
+    reset_parser.add_argument("--all", action="store_true", help="Reset all companies")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -227,6 +261,7 @@ def main():
         "extract": cmd_extract,
         "check": cmd_check,
         "status": cmd_status,
+        "reset": cmd_reset,
     }
     commands[args.command](args)
 

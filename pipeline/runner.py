@@ -42,6 +42,12 @@ def process_company(
     company_name = company.name
     log.info(f"Processing: {company_name}")
 
+    # Skip if we already have emissions data for this company
+    existing = session.query(EmissionsRecord).filter_by(company_id=company.id).count()
+    if existing > 0:
+        log.info(f"  Skipping: already have {existing} records")
+        return {"status": "skipped", "records": existing}
+
     # Step 1: Search for emissions source
     search_result = search_for_emissions_source(company_name, anthropic_key, exa_key)
     url = search_result["url"]
@@ -181,12 +187,16 @@ def run_pipeline(
     errors = []
     n_success = 0
     n_failed = 0
+    n_skipped = 0
 
     for i, company in enumerate(companies):
         log.info(f"[{i + 1}/{len(companies)}] {company.name}")
         try:
             result = process_company(company, anthropic_key, exa_key, llama_key, session)
-            n_success += 1
+            if result.get("status") == "skipped":
+                n_skipped += 1
+            else:
+                n_success += 1
         except Exception as e:
             log.error(f"  FAILED: {e}")
             errors.append(f"{company.name}: {e}")
@@ -201,10 +211,12 @@ def run_pipeline(
         if (i + 1) % 10 == 0:
             run.successful = n_success
             run.failed = n_failed
+            run.skipped = n_skipped
             session.commit()
 
     run.successful = n_success
     run.failed = n_failed
+    run.skipped = n_skipped
     run.completed_at = datetime.utcnow()
     run.status = "completed"
     run.error_log = "\n".join(errors) if errors else None
