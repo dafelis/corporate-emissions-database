@@ -111,7 +111,11 @@ with col1:
         ("Scope 3", record.scope_3),
     ]:
         data["Scope"].append(label)
-        data["Value"].append(f"{value:,.0f}" if value is not None else "—")
+        if value is not None:
+            # Show decimal places if the value has them, otherwise show as integer
+            data["Value"].append(f"{value:,.2f}".rstrip("0").rstrip(".") if value != int(value) else f"{int(value):,}")
+        else:
+            data["Value"].append("—")
         data["Unit"].append(record.unit or "—")
 
     st.table(pd.DataFrame(data))
@@ -141,9 +145,9 @@ with col1:
         for p in reversed(prior):
             prior_data.append({
                 "Year": p.reporting_year,
-                "Scope 1": f"{p.scope_1:,.0f}" if p.scope_1 else "—",
-                "Scope 2": f"{p.scope_2_location:,.0f}" if p.scope_2_location else "—",
-                "Scope 3": f"{p.scope_3:,.0f}" if p.scope_3 else "—",
+                "Scope 1": (f"{p.scope_1:,.2f}".rstrip("0").rstrip(".") if p.scope_1 != int(p.scope_1) else f"{int(p.scope_1):,}") if p.scope_1 else "—",
+                "Scope 2": (f"{p.scope_2_location:,.2f}".rstrip("0").rstrip(".") if p.scope_2_location != int(p.scope_2_location) else f"{int(p.scope_2_location):,}") if p.scope_2_location else "—",
+                "Scope 3": (f"{p.scope_3:,.2f}".rstrip("0").rstrip(".") if p.scope_3 != int(p.scope_3) else f"{int(p.scope_3):,}") if p.scope_3 else "—",
             })
         st.table(pd.DataFrame(prior_data))
 
