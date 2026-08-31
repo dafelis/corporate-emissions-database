@@ -158,12 +158,18 @@ with col2:
         st.write(f"Type: {source.document_type}")
         if source.url:
             st.markdown(f"[Open URL]({source.url})")
-        if source.s3_pdf_key:
-            st.caption(f"S3: {source.s3_pdf_key}")
-        if source.page_number:
-            st.caption(f"Page: {source.page_number}")
+        if source.page_number is not None:
+            st.caption(f"Page: {source.page_number + 1}")
     else:
         st.write("No source linked")
+
+    # Source preview — PDF screenshot or HTML/Excel table
+    if source and source.screenshot_path and os.path.exists(source.screenshot_path):
+        st.markdown("**Source table (PDF screenshot):**")
+        st.image(source.screenshot_path, use_container_width=True)
+    elif source and source.html_snippet:
+        st.markdown("**Source table:**")
+        st.markdown(source.html_snippet, unsafe_allow_html=True)
 
     # Confidence
     score = record.confidence_score

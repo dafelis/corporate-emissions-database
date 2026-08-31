@@ -89,6 +89,8 @@ class Source(Base):
     document_type = Column(String(50))  # pdf / excel / html
     s3_pdf_key = Column(Text)       # S3 path to stored PDF
     s3_screenshot_key = Column(Text)  # S3 path to screenshot of relevant page
+    screenshot_path = Column(Text)    # local path to PDF page screenshot
+    html_snippet = Column(Text)       # raw HTML of the source table (for HTML/Excel)
     page_number = Column(Integer)     # page where data was found
     fetched_at = Column(DateTime, default=datetime.utcnow)
 

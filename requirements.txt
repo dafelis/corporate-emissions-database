@@ -8,6 +8,7 @@ llama-parse
 beautifulsoup4
 pandas
 openpyxl
+pymupdf
 
 # Database
 psycopg2-binary

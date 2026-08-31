@@ -82,12 +82,17 @@ def _extract_tables_from_text(text: str) -> list[str]:
     return tables
 
 
-def extract_tables_from_documents(documents: list) -> list[str]:
-    """Extract all tables from parsed documents as markdown strings."""
-    tables = []
-    for doc in documents:
-        tables.extend(_extract_tables_from_text(doc.text))
-    return tables
+def extract_tables_from_documents(documents: list) -> list[dict]:
+    """Extract all tables from parsed documents.
+
+    Returns a list of dicts: {markdown: str, page_index: int}
+    page_index is 0-based and corresponds to the pymupdf page index.
+    """
+    results = []
+    for page_idx, doc in enumerate(documents):
+        for table_text in _extract_tables_from_text(doc.text):
+            results.append({"markdown": table_text, "page_index": page_idx})
+    return results
 
 
 def _df_to_markdown(df: pd.DataFrame) -> str:
@@ -103,8 +108,11 @@ def _df_to_markdown(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def parse_excel(source: str) -> list[str]:
-    """Parse an Excel file and return markdown tables, one per non-empty sheet."""
+def parse_excel(source: str) -> list[dict]:
+    """Parse an Excel file and return table dicts, one per non-empty sheet.
+
+    Returns list of {markdown: str, html_snippet: str}.
+    """
     if source.startswith("http://") or source.startswith("https://"):
         resp = requests.get(source, headers=_BROWSER_HEADERS, timeout=60)
         resp.raise_for_status()
@@ -117,7 +125,10 @@ def parse_excel(source: str) -> list[str]:
     for sheet_name in xl.sheet_names:
         df = xl.parse(sheet_name)
         if not df.empty:
-            tables.append(_df_to_markdown(df))
+            tables.append({
+                "markdown": _df_to_markdown(df),
+                "html_snippet": df.to_html(index=False, classes="source-table"),
+            })
     return tables
 
 
@@ -145,8 +156,11 @@ def _html_table_to_markdown(tag) -> str:
     return "\n".join(lines)
 
 
-def parse_html(url: str) -> list[str]:
-    """Fetch an HTML page and extract all tables as markdown strings."""
+def parse_html(url: str) -> list[dict]:
+    """Fetch an HTML page and extract all tables.
+
+    Returns list of {markdown: str, html_snippet: str}.
+    """
     resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=60)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -154,7 +168,10 @@ def parse_html(url: str) -> list[str]:
     for tag in soup.find_all("table"):
         md = _html_table_to_markdown(tag)
         if md:
-            tables.append(md)
+            tables.append({
+                "markdown": md,
+                "html_snippet": str(tag),
+            })
     return tables
 
 
@@ -167,6 +184,16 @@ def extract_html_text(url: str) -> str:
         tag.decompose()
     text = soup.get_text(separator="\n", strip=True)
     return text[:50_000]
+
+
+def render_pdf_page(pdf_path: str, page_index: int, output_path: str, dpi: int = 150) -> None:
+    """Render a single PDF page as a PNG image."""
+    import fitz  # pymupdf
+    doc = fitz.open(pdf_path)
+    page = doc[page_index]
+    pix = page.get_pixmap(dpi=dpi)
+    pix.save(output_path)
+    doc.close()
 
 
 def detect_source_type(url: str) -> str:

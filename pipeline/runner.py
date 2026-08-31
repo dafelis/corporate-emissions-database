@@ -16,6 +16,7 @@ from pipeline.searcher import search_for_emissions_source
 from pipeline.parser import (
     parse_pdf, extract_tables_from_documents, parse_html, parse_excel,
     extract_html_text, detect_source_type, download_to_tempfile,
+    render_pdf_page,
 )
 from pipeline.extractor import find_emissions_tables, extract_emissions, extract_emissions_from_text
 from pipeline.storage import upload_file
@@ -56,19 +57,24 @@ def process_company(
     log.info(f"  Found source: {title} ({source_type})")
 
     # Step 2: Parse the document
-    tables = []
+    table_dicts = []  # list of {markdown, page_index/html_snippet}
+    pdf_local_path = None
     if source_type == "pdf":
         documents = parse_pdf(url, llama_key)
-        tables = extract_tables_from_documents(documents)
+        table_dicts = extract_tables_from_documents(documents)
     elif source_type == "excel":
-        tables = parse_excel(url)
+        table_dicts = parse_excel(url)
     else:
-        tables = parse_html(url)
+        table_dicts = parse_html(url)
+
+    # Extract just the markdown for ranking
+    tables_md = [t["markdown"] for t in table_dicts]
 
     # Step 3: Find and extract emissions data
     extraction = None
-    if tables:
-        ranked = find_emissions_tables(tables, client)
+    matched_table_idx = None
+    if tables_md:
+        ranked = find_emissions_tables(tables_md, client)
         top_tables = [r for r in ranked if r["score"] >= 30]
 
         if top_tables:
@@ -76,9 +82,10 @@ def process_company(
             for candidate in top_tables[:3]:
                 try:
                     extraction = extract_emissions(
-                        tables[candidate["index"]], company_name, client
+                        tables_md[candidate["index"]], company_name, client
                     )
                     if extraction.get("emissions"):
+                        matched_table_idx = candidate["index"]
                         break
                 except Exception as e:
                     log.warning(f"  Extraction failed for table {candidate['index']}: {e}")
@@ -94,17 +101,41 @@ def process_company(
     if not extraction or not extraction.get("emissions"):
         raise ValueError(f"No emissions data found for {company_name}")
 
-    # Step 4: Store source document in S3
+    # Step 4: Capture source preview
     s3_pdf_key = None
-    if source_type == "pdf":
+    screenshot_path = None
+    html_snippet = None
+    page_number = None
+
+    if source_type == "pdf" and matched_table_idx is not None:
+        page_number = table_dicts[matched_table_idx].get("page_index")
+        # Download PDF and render the relevant page
         try:
-            local_path = download_to_tempfile(url)
-            safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
-            s3_key = f"sources/{safe_name}/report.pdf"
-            s3_pdf_key = upload_file(local_path, s3_key)
-            os.unlink(local_path)
+            pdf_local_path = download_to_tempfile(url)
+            if page_number is not None:
+                safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
+                screenshots_dir = os.path.join(os.path.dirname(__file__), "..", "screenshots")
+                os.makedirs(screenshots_dir, exist_ok=True)
+                screenshot_path = os.path.join(screenshots_dir, f"{safe_name}_p{page_number}.png")
+                render_pdf_page(pdf_local_path, page_number, screenshot_path)
+                log.info(f"  Screenshot saved: {screenshot_path}")
+
+            # Try S3 upload
+            try:
+                s3_key = f"sources/{safe_name}/report.pdf"
+                s3_pdf_key = upload_file(pdf_local_path, s3_key)
+            except Exception as e:
+                log.warning(f"  Failed to upload PDF to S3: {e}")
+
+            os.unlink(pdf_local_path)
         except Exception as e:
-            log.warning(f"  Failed to upload PDF to S3: {e}")
+            log.warning(f"  Failed to capture PDF screenshot: {e}")
+            if pdf_local_path and os.path.exists(pdf_local_path):
+                os.unlink(pdf_local_path)
+
+    elif matched_table_idx is not None:
+        # HTML or Excel — save the raw HTML snippet
+        html_snippet = table_dicts[matched_table_idx].get("html_snippet")
 
     # Step 5: Save to database
     source = Source(
@@ -113,6 +144,9 @@ def process_company(
         title=title,
         document_type=source_type,
         s3_pdf_key=s3_pdf_key,
+        screenshot_path=screenshot_path,
+        html_snippet=html_snippet,
+        page_number=page_number,
     )
     session.add(source)
     session.flush()

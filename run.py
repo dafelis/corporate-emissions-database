@@ -51,16 +51,21 @@ def cmd_init(args):
     from sqlalchemy import text
     from db.models import get_engine
     engine = get_engine(config["DATABASE_URL"])
-    for col, coltype in [
-        ("lei_legal_name", "VARCHAR(500)"),
-        ("lei_country", "VARCHAR(10)"),
-        ("lei_confidence", "VARCHAR(20)"),
-        ("lei_flag_reason", "TEXT"),
-        ("lei_review_status", "VARCHAR(20) DEFAULT 'pending'"),
-    ]:
+    migrations = [
+        # Companies table — LEI fields
+        ("companies", "lei_legal_name", "VARCHAR(500)"),
+        ("companies", "lei_country", "VARCHAR(10)"),
+        ("companies", "lei_confidence", "VARCHAR(20)"),
+        ("companies", "lei_flag_reason", "TEXT"),
+        ("companies", "lei_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+        # Sources table — preview fields
+        ("sources", "screenshot_path", "TEXT"),
+        ("sources", "html_snippet", "TEXT"),
+    ]
+    for table, col, coltype in migrations:
         with engine.connect() as conn:
             try:
-                conn.execute(text(f"ALTER TABLE companies ADD COLUMN {col} {coltype}"))
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}"))
                 conn.commit()
                 print(f"  Added column: {col}")
             except Exception:
