@@ -11,7 +11,10 @@ from datetime import datetime
 
 import anthropic
 
-from db.models import Company, EmissionsRecord, Source, PipelineRun, get_session, create_tables
+from db.models import (
+    Company, EmissionsRecord, FinancialRecord, Source, PipelineRun,
+    get_session, create_tables,
+)
 from pipeline.searcher import search_for_emissions_source
 from pipeline.parser import (
     parse_pdf, extract_tables_from_documents, parse_html, parse_excel,
@@ -19,6 +22,9 @@ from pipeline.parser import (
     render_pdf_page,
 )
 from pipeline.extractor import find_emissions_tables, extract_emissions, extract_emissions_from_text
+from pipeline.financial_extractor import find_financial_tables, extract_financials, normalise_to_units
+from pipeline.market_data import get_equity_value_at_date, get_industry_info
+from pipeline.industry_classifier import classify_company
 from pipeline.storage import upload_file
 
 logging.basicConfig(
@@ -174,9 +180,114 @@ def process_company(
     session.commit()
     log.info(f"  Saved {records_saved} emissions records")
 
+    # Step 6: Extract financial data from the same tables
+    fin_records_saved = 0
+    existing_fin = session.query(FinancialRecord).filter_by(company_id=company.id).count()
+    if existing_fin == 0 and tables_md:
+        try:
+            fin_ranked = find_financial_tables(tables_md, client)
+            fin_top = [r for r in fin_ranked if r["score"] >= 30]
+
+            if fin_top:
+                for candidate in fin_top[:3]:
+                    try:
+                        fin_extraction = extract_financials(
+                            tables_md[candidate["index"]], company_name, client
+                        )
+                        if fin_extraction.get("financials"):
+                            for entry in fin_extraction["financials"]:
+                                multiplier = entry.get("unit_multiplier", 1) or 1
+                                fy_end = None
+                                if entry.get("fiscal_year_end"):
+                                    try:
+                                        from datetime import date as date_type
+                                        fy_end = date_type.fromisoformat(entry["fiscal_year_end"])
+                                    except (ValueError, TypeError):
+                                        pass
+
+                                revenue = normalise_to_units(entry.get("revenue"), multiplier)
+                                debt = normalise_to_units(entry.get("outstanding_debt"), multiplier)
+                                cash = normalise_to_units(entry.get("cash_and_equivalents"), multiplier)
+
+                                # Get equity value from yfinance at fiscal year-end
+                                equity_data = None
+                                if company.ticker and fy_end:
+                                    equity_data = get_equity_value_at_date(company.ticker, fy_end)
+                                elif company.ticker:
+                                    # Approximate with Dec 31 of reporting year
+                                    from datetime import date as date_type
+                                    approx_date = date_type(entry["reporting_year"], 12, 31)
+                                    equity_data = get_equity_value_at_date(company.ticker, approx_date)
+
+                                equity_value = equity_data["market_cap"] if equity_data else None
+                                ev = None
+                                if equity_value is not None and debt is not None and cash is not None:
+                                    ev = equity_value + debt - cash
+
+                                fin_record = FinancialRecord(
+                                    company_id=company.id,
+                                    reporting_year=entry["reporting_year"],
+                                    fiscal_year_end=fy_end,
+                                    revenue=revenue,
+                                    outstanding_debt=debt,
+                                    cash_and_equivalents=cash,
+                                    currency=entry.get("currency"),
+                                    equity_value=equity_value,
+                                    shares_outstanding=equity_data["shares_outstanding"] if equity_data else None,
+                                    share_price_at_fy_end=equity_data["share_price"] if equity_data else None,
+                                    equity_currency=equity_data["currency"] if equity_data else None,
+                                    enterprise_value=ev,
+                                    source_id=source.id,
+                                    confidence_score=fin_extraction.get("confidence_score"),
+                                    review_status="pending",
+                                )
+                                session.add(fin_record)
+                                fin_records_saved += 1
+                            break
+                    except Exception as e:
+                        log.warning(f"  Financial extraction failed for table {candidate['index']}: {e}")
+                        continue
+
+            session.commit()
+            log.info(f"  Saved {fin_records_saved} financial records")
+        except Exception as e:
+            log.warning(f"  Financial extraction failed: {e}")
+            session.rollback()
+
+    # Step 7: Industry classification (once per company)
+    if not company.yfinance_sector and company.ticker:
+        try:
+            industry_info = get_industry_info(company.ticker)
+            if industry_info:
+                company.yfinance_sector = industry_info["sector"]
+                company.yfinance_industry = industry_info["industry"]
+                log.info(f"  Industry: {industry_info['sector']} / {industry_info['industry']}")
+
+                # Map to NAICS/NACE/SIC using Claude
+                classification = classify_company(
+                    company_name,
+                    industry_info["sector"],
+                    industry_info["industry"],
+                    client,
+                )
+                company.sic_code = classification.get("sic_code")
+                company.sic_description = classification.get("sic_description")
+                company.naics_code = classification.get("naics_code")
+                company.naics_description = classification.get("naics_description")
+                company.nace_code = classification.get("nace_code")
+                company.nace_description = classification.get("nace_description")
+                company.industry_review_status = (
+                    "approved" if classification.get("confidence") == "high" else "pending"
+                )
+                session.commit()
+                log.info(f"  Classified: SIC={company.sic_code}, NAICS={company.naics_code}, NACE={company.nace_code}")
+        except Exception as e:
+            log.warning(f"  Industry classification failed: {e}")
+
     return {
         "status": "success",
-        "records": records_saved,
+        "emissions_records": records_saved,
+        "financial_records": fin_records_saved,
         "source_url": url,
         "confidence": extraction.get("confidence_score"),
     }

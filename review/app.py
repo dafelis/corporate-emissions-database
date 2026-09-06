@@ -17,7 +17,7 @@ from sqlalchemy import func
 
 load_dotenv()
 
-from db.models import Company, EmissionsRecord, Source, PipelineRun, get_session
+from db.models import Company, EmissionsRecord, FinancialRecord, Source, PipelineRun, get_session
 
 st.set_page_config(page_title="Emissions Data Review", layout="wide")
 st.title("Emissions Data Review")
@@ -199,6 +199,64 @@ with col2:
             st.warning(company.lei_flag_reason)
     else:
         st.write("Not found")
+
+    # Industry classification
+    if company.yfinance_sector:
+        st.markdown("**Industry**")
+        st.write(f"{company.yfinance_sector} / {company.yfinance_industry or '—'}")
+        if company.sic_code:
+            st.caption(f"SIC: {company.sic_code} — {company.sic_description or ''}")
+        if company.naics_code:
+            st.caption(f"NAICS: {company.naics_code} — {company.naics_description or ''}")
+        if company.nace_code:
+            st.caption(f"NACE: {company.nace_code} — {company.nace_description or ''}")
+
+# --- Financial data ---
+fin_record = (
+    session.query(FinancialRecord)
+    .filter_by(company_id=company.id, reporting_year=record.reporting_year)
+    .first()
+)
+
+if fin_record:
+    st.markdown("---")
+    st.subheader("Financial Data")
+    fin_col1, fin_col2 = st.columns(2)
+
+    def _fmt_currency(value, currency=""):
+        if value is None:
+            return "—"
+        prefix = f"{currency} " if currency else ""
+        if abs(value) >= 1_000_000_000:
+            return f"{prefix}{value / 1_000_000_000:,.2f}bn"
+        if abs(value) >= 1_000_000:
+            return f"{prefix}{value / 1_000_000:,.1f}m"
+        return f"{prefix}{value:,.0f}"
+
+    with fin_col1:
+        st.markdown("**From company report:**")
+        fin_data = {
+            "Metric": ["Revenue", "Outstanding debt", "Cash & equivalents"],
+            "Value": [
+                _fmt_currency(fin_record.revenue, fin_record.currency),
+                _fmt_currency(fin_record.outstanding_debt, fin_record.currency),
+                _fmt_currency(fin_record.cash_and_equivalents, fin_record.currency),
+            ],
+        }
+        st.table(pd.DataFrame(fin_data))
+
+    with fin_col2:
+        st.markdown("**Market data:**")
+        mkt_data = {
+            "Metric": ["Equity value (market cap)", "Enterprise value"],
+            "Value": [
+                _fmt_currency(fin_record.equity_value, fin_record.equity_currency),
+                _fmt_currency(fin_record.enterprise_value, fin_record.equity_currency),
+            ],
+        }
+        st.table(pd.DataFrame(mkt_data))
+        if fin_record.fiscal_year_end:
+            st.caption(f"As at fiscal year-end: {fin_record.fiscal_year_end}")
 
 # --- Review actions ---
 st.markdown("---")

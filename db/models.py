@@ -26,6 +26,18 @@ class Company(Base):
     lei_flag_reason = Column(Text)            # why it was flagged (if applicable)
     lei_review_status = Column(String(20), default="pending")  # pending / approved / rejected
     index_membership = Column(String(50))     # e.g. "FTSE100"
+
+    # Industry classification
+    yfinance_sector = Column(String(200))     # sector from yfinance
+    yfinance_industry = Column(String(200))   # industry from yfinance
+    sic_code = Column(String(20))             # SIC code (from registry or mapped)
+    sic_description = Column(String(500))
+    naics_code = Column(String(20))           # NAICS code (mapped by Claude)
+    naics_description = Column(String(500))
+    nace_code = Column(String(20))            # NACE code (mapped by Claude)
+    nace_description = Column(String(500))
+    industry_review_status = Column(String(20), default="pending")
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
     emissions = relationship("EmissionsRecord", back_populates="company")
@@ -99,6 +111,51 @@ class Source(Base):
 
     def __repr__(self):
         return f"<Source {self.url}>"
+
+
+class FinancialRecord(Base):
+    __tablename__ = "financial_records"
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    reporting_year = Column(Integer, nullable=False)
+    fiscal_year_end = Column(Date)  # actual date the fiscal year ended
+
+    # From company reports (in reporting currency)
+    revenue = Column(Float)
+    outstanding_debt = Column(Float)
+    cash_and_equivalents = Column(Float)
+    currency = Column(String(10))  # e.g. "GBP", "USD", "EUR"
+
+    # From market data (yfinance)
+    equity_value = Column(Float)          # market cap at fiscal year-end
+    shares_outstanding = Column(Float)
+    share_price_at_fy_end = Column(Float)
+    equity_currency = Column(String(10))  # currency of equity value
+
+    # Calculated
+    enterprise_value = Column(Float)  # equity_value + debt - cash
+
+    # Extraction metadata
+    source_id = Column(Integer, ForeignKey("sources.id"))
+    extraction_date = Column(DateTime, default=datetime.utcnow)
+    confidence_score = Column(Integer)  # 0-100
+
+    # Review status
+    review_status = Column(String(20), default="pending")
+    flag_reason = Column(Text)
+    reviewed_by = Column(String(100))
+    reviewed_at = Column(DateTime)
+
+    company = relationship("Company", backref="financials")
+    source = relationship("Source")
+
+    __table_args__ = (
+        Index("ix_financial_company_year", "company_id", "reporting_year"),
+    )
+
+    def __repr__(self):
+        return f"<FinancialRecord {self.company_id} year={self.reporting_year}>"
 
 
 class PipelineRun(Base):

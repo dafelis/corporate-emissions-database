@@ -58,6 +58,16 @@ def cmd_init(args):
         ("companies", "lei_confidence", "VARCHAR(20)"),
         ("companies", "lei_flag_reason", "TEXT"),
         ("companies", "lei_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+        # Companies table — industry classification
+        ("companies", "yfinance_sector", "VARCHAR(200)"),
+        ("companies", "yfinance_industry", "VARCHAR(200)"),
+        ("companies", "sic_code", "VARCHAR(20)"),
+        ("companies", "sic_description", "VARCHAR(500)"),
+        ("companies", "naics_code", "VARCHAR(20)"),
+        ("companies", "naics_description", "VARCHAR(500)"),
+        ("companies", "nace_code", "VARCHAR(20)"),
+        ("companies", "nace_description", "VARCHAR(500)"),
+        ("companies", "industry_review_status", "VARCHAR(20) DEFAULT 'pending'"),
         # Sources table — preview fields
         ("sources", "screenshot_path", "TEXT"),
         ("sources", "html_snippet", "TEXT"),
@@ -177,7 +187,7 @@ def cmd_status(args):
     """Show database status."""
     config = get_config()
 
-    from db.models import get_session, Company, EmissionsRecord, PipelineRun
+    from db.models import get_session, Company, EmissionsRecord, FinancialRecord, PipelineRun
 
     session = get_session(config["DATABASE_URL"])
 
@@ -189,11 +199,16 @@ def cmd_status(args):
 
     last_run = session.query(PipelineRun).order_by(PipelineRun.started_at.desc()).first()
 
-    print(f"Companies:        {n_companies}")
-    print(f"Emissions records: {n_records}")
-    print(f"  Pending review: {n_pending}")
-    print(f"  Flagged:        {n_flagged}")
-    print(f"  Approved:       {n_approved}")
+    n_fin_records = session.query(FinancialRecord).count()
+    n_classified = session.query(Company).filter(Company.naics_code.isnot(None)).count()
+
+    print(f"Companies:          {n_companies}")
+    print(f"  With industry:    {n_classified}")
+    print(f"Emissions records:  {n_records}")
+    print(f"  Pending review:   {n_pending}")
+    print(f"  Flagged:          {n_flagged}")
+    print(f"  Approved:         {n_approved}")
+    print(f"Financial records:  {n_fin_records}")
 
     if last_run:
         print(f"\nLast pipeline run: {last_run.started_at}")
@@ -205,7 +220,7 @@ def cmd_reset(args):
     """Delete emissions data for a company (so it can be re-extracted)."""
     config = get_config()
 
-    from db.models import get_session, Company, EmissionsRecord, Source
+    from db.models import get_session, Company, EmissionsRecord, FinancialRecord, Source
 
     session = get_session(config["DATABASE_URL"])
 
@@ -222,9 +237,16 @@ def cmd_reset(args):
         sys.exit(1)
 
     for company in companies:
+        n_fin = session.query(FinancialRecord).filter_by(company_id=company.id).delete()
         n_records = session.query(EmissionsRecord).filter_by(company_id=company.id).delete()
         n_sources = session.query(Source).filter_by(company_id=company.id).delete()
-        print(f"  {company.name}: deleted {n_records} records, {n_sources} sources")
+        # Reset industry classification if requested
+        company.yfinance_sector = None
+        company.yfinance_industry = None
+        company.sic_code = None
+        company.naics_code = None
+        company.nace_code = None
+        print(f"  {company.name}: deleted {n_records} emissions, {n_fin} financial, {n_sources} sources")
 
     session.commit()
     print("Reset complete")

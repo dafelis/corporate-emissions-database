@@ -20,5 +20,8 @@ boto3
 # Review UI
 streamlit
 
+# Market data
+yfinance
+
 # Utilities
 python-dotenv
