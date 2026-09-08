@@ -14,6 +14,8 @@ EMISSIONS_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "reporting_year": {"type": "integer"},
+                    "period_start": {"type": "string", "description": "Start of reporting period in YYYY-MM-DD format, e.g. '2025-01-01' for calendar year or '2025-04-01' for April fiscal year. Null if not stated."},
+                    "period_end": {"type": "string", "description": "End of reporting period in YYYY-MM-DD format, e.g. '2025-12-31' for calendar year or '2026-03-31' for March fiscal year. Null if not stated."},
                     "scope_1": {"type": "number", "description": "Scope 1 emissions value, or null if not found"},
                     "scope_2_location": {"type": "number", "description": "Scope 2 location-based value, or null"},
                     "scope_2_market": {"type": "number", "description": "Scope 2 market-based value, or null"},
@@ -127,6 +129,11 @@ def extract_emissions(
             "market-based if available), and Scope 3 emissions for ALL years present in the table. "
             "Normalise all values to the same unit (prefer tonnes CO2e). "
             "If the table uses kt or Mt, convert to tonnes. "
+            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+            "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
+            "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
+            "For example, 'year ended 31 March 2025' means period_start='2024-04-01', "
+            "period_end='2025-03-31'. If not stated, set both to null. "
             "Note any methodology information, restatements, or caveats. "
             "If a scope is not present in the table, set its value to null. "
             "Be precise — extract the exact numbers from the table."
@@ -168,6 +175,10 @@ def extract_emissions_from_text(
             "Extract Scope 1, Scope 2 (both location-based and market-based if available), "
             "and Scope 3 emissions for ALL years mentioned. "
             "Normalise all values to tonnes CO2e. "
+            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+            "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
+            "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
+            "If not stated, set both to null. "
             "If a scope is not found, set its value to null. "
             "Be precise — extract exact numbers only, do not estimate."
         ),

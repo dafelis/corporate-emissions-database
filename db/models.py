@@ -53,6 +53,8 @@ class EmissionsRecord(Base):
     id = Column(Integer, primary_key=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
     reporting_year = Column(Integer, nullable=False)
+    period_start = Column(Date)   # e.g. 2025-01-01 or 2025-04-01
+    period_end = Column(Date)     # e.g. 2025-12-31 or 2026-03-31
 
     # Emissions values (tonnes CO2e)
     scope_1 = Column(Float)
@@ -120,6 +122,8 @@ class FinancialRecord(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
     reporting_year = Column(Integer, nullable=False)
     fiscal_year_end = Column(Date)  # actual date the fiscal year ended
+    period_start = Column(Date)   # e.g. 2025-01-01 or 2025-04-01
+    period_end = Column(Date)     # e.g. 2025-12-31 or 2026-03-31
 
     # From company reports (in reporting currency)
     revenue = Column(Float)

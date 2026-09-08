@@ -168,9 +168,25 @@ def process_company(
                 session.flush()
 
                 for entry in extraction["emissions"]:
+                    # Parse period dates
+                    e_period_start = None
+                    e_period_end = None
+                    if entry.get("period_start"):
+                        try:
+                            e_period_start = date_type.fromisoformat(entry["period_start"])
+                        except (ValueError, TypeError):
+                            pass
+                    if entry.get("period_end"):
+                        try:
+                            e_period_end = date_type.fromisoformat(entry["period_end"])
+                        except (ValueError, TypeError):
+                            pass
+
                     record = EmissionsRecord(
                         company_id=company.id,
                         reporting_year=entry["reporting_year"],
+                        period_start=e_period_start,
+                        period_end=e_period_end,
                         scope_1=entry.get("scope_1"),
                         scope_2_location=entry.get("scope_2_location"),
                         scope_2_market=entry.get("scope_2_market"),
@@ -237,6 +253,20 @@ def process_company(
                                         except (ValueError, TypeError):
                                             pass
 
+                                    # Parse period dates
+                                    f_period_start = None
+                                    f_period_end = None
+                                    if entry.get("period_start"):
+                                        try:
+                                            f_period_start = date_type.fromisoformat(entry["period_start"])
+                                        except (ValueError, TypeError):
+                                            pass
+                                    if entry.get("period_end"):
+                                        try:
+                                            f_period_end = date_type.fromisoformat(entry["period_end"])
+                                        except (ValueError, TypeError):
+                                            pass
+
                                     revenue = normalise_to_units(entry.get("revenue"), multiplier)
                                     debt = normalise_to_units(entry.get("outstanding_debt"), multiplier)
                                     cash = normalise_to_units(entry.get("cash_and_equivalents"), multiplier)
@@ -245,6 +275,8 @@ def process_company(
                                         company_id=company.id,
                                         reporting_year=entry["reporting_year"],
                                         fiscal_year_end=fy_end,
+                                        period_start=f_period_start,
+                                        period_end=f_period_end,
                                         revenue=revenue,
                                         outstanding_debt=debt,
                                         cash_and_equivalents=cash,

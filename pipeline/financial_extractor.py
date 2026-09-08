@@ -14,9 +14,17 @@ FINANCIAL_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "reporting_year": {"type": "integer"},
+                    "period_start": {
+                        "type": "string",
+                        "description": "Start of reporting period in YYYY-MM-DD format, e.g. '2025-01-01' for calendar year or '2025-04-01' for April fiscal year. Null if not stated.",
+                    },
+                    "period_end": {
+                        "type": "string",
+                        "description": "End of reporting period in YYYY-MM-DD format, e.g. '2025-12-31' for calendar year or '2026-03-31' for March fiscal year. Null if not stated.",
+                    },
                     "fiscal_year_end": {
                         "type": "string",
-                        "description": "Fiscal year end date in YYYY-MM-DD format, if stated",
+                        "description": "Fiscal year end date in YYYY-MM-DD format, if stated. Should match period_end.",
                     },
                     "revenue": {
                         "type": "number",
@@ -148,7 +156,12 @@ def extract_financials(
             "this is usually stated in the table header or a note. Set unit_multiplier "
             "accordingly and report the raw numbers as shown in the table. "
             "Identify the currency from the table (GBP, USD, EUR, etc). "
-            "Note the fiscal year end date if visible (e.g. 'Year ended 31 December 2024'). "
+            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+            "'year ended 31 December', 'for the 12 months to 31 March', 'FY2025' etc. "
+            "Set period_start and period_end as YYYY-MM-DD dates. For example, "
+            "'year ended 31 March 2025' means period_start='2024-04-01', period_end='2025-03-31'. "
+            "Also set fiscal_year_end to the period_end date. "
+            "If not stated, set period_start and period_end to null. "
             "If a value is not present in the table, set it to null."
         ),
         messages=[

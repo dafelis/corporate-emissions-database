@@ -94,6 +94,12 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.subheader(f"{company.name} — {record.reporting_year}")
 
+    # Show reporting period if available
+    if record.period_start and record.period_end:
+        st.caption(f"📅 Reporting period: {record.period_start.strftime('%d %b %Y')} – {record.period_end.strftime('%d %b %Y')}")
+    elif record.period_end:
+        st.caption(f"📅 Period ending: {record.period_end.strftime('%d %b %Y')}")
+
     if record.flag_reason:
         st.warning(f"Flag reason: {record.flag_reason}")
 
@@ -221,6 +227,10 @@ fin_record = (
 if fin_record:
     st.markdown("---")
     st.subheader("Financial Data")
+    if fin_record.period_start and fin_record.period_end:
+        st.caption(f"📅 Financial period: {fin_record.period_start.strftime('%d %b %Y')} – {fin_record.period_end.strftime('%d %b %Y')}")
+    elif fin_record.fiscal_year_end:
+        st.caption(f"📅 Fiscal year ending: {fin_record.fiscal_year_end.strftime('%d %b %Y')}")
     fin_col1, fin_col2 = st.columns(2)
 
     def _fmt_currency(value, currency=""):

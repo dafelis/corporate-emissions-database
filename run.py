@@ -68,6 +68,12 @@ def cmd_init(args):
         ("companies", "nace_code", "VARCHAR(20)"),
         ("companies", "nace_description", "VARCHAR(500)"),
         ("companies", "industry_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+        # Emissions table — reporting period
+        ("emissions_records", "period_start", "DATE"),
+        ("emissions_records", "period_end", "DATE"),
+        # Financial table — reporting period
+        ("financial_records", "period_start", "DATE"),
+        ("financial_records", "period_end", "DATE"),
         # Sources table — preview fields
         ("sources", "screenshot_path", "TEXT"),
         ("sources", "html_snippet", "TEXT"),
