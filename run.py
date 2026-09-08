@@ -36,6 +36,37 @@ def get_config():
     return required
 
 
+def _terminate_other_connections(database_url: str):
+    """Kill other connections to the database to avoid lock contention.
+
+    This prevents 'CREATE TABLE' and 'ALTER TABLE' from hanging when
+    Streamlit (or another process) holds open connections.
+    """
+    from sqlalchemy import text
+    from db.models import get_engine
+
+    # Connect to the 'postgres' maintenance database to terminate others
+    admin_url = database_url.rsplit("/", 1)[0] + "/postgres"
+    db_name = database_url.rsplit("/", 1)[1].split("?")[0]
+
+    try:
+        engine = get_engine(admin_url)
+        with engine.connect() as conn:
+            result = conn.execute(text(
+                "SELECT pg_terminate_backend(pid) "
+                "FROM pg_stat_activity "
+                "WHERE datname = :db AND pid <> pg_backend_pid()"
+            ), {"db": db_name})
+            terminated = sum(1 for row in result if row[0])
+            if terminated:
+                print(f"  Terminated {terminated} blocking connection(s)")
+            conn.commit()
+        engine.dispose()
+    except Exception as e:
+        print(f"  Warning: could not clear connections: {e}")
+        print("  If init hangs, manually run: sudo -u postgres psql -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'emissions' AND pid <> pg_backend_pid();\"")
+
+
 def cmd_init(args):
     """Initialise the database and load FTSE 100 companies with LEI lookup."""
     config = get_config()
@@ -45,6 +76,7 @@ def cmd_init(args):
     from pipeline.lei_lookup import lookup_lei
 
     print("Creating database tables...")
+    _terminate_other_connections(config["DATABASE_URL"])
     create_tables(config["DATABASE_URL"])
 
     # Add new LEI columns if they don't exist (migration for existing databases)
