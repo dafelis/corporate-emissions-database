@@ -273,9 +273,19 @@ def _extract_financials_round(
                 tables_md[candidate["index"]], company_name, client
             )
             if fin_extraction.get("financials"):
+                # Capture source preview for financial document
+                screenshot_path, html_snippet, page_number, s3_pdf_key = (
+                    _capture_source_preview(
+                        url, source_type, table_dicts,
+                        candidate["index"], company_name,
+                    )
+                )
+
                 fin_source = Source(
                     company_id=company.id, url=url, title=title,
-                    document_type=source_type,
+                    document_type=source_type, s3_pdf_key=s3_pdf_key,
+                    screenshot_path=screenshot_path, html_snippet=html_snippet,
+                    page_number=page_number,
                 )
                 session.add(fin_source)
                 session.flush()
@@ -415,9 +425,17 @@ def process_company(
                             tables_md[candidate["index"]], company_name, client
                         )
                         if fin_extraction.get("financials"):
+                            screenshot_path, html_snippet, page_number, s3_pdf_key = (
+                                _capture_source_preview(
+                                    url, source_type, table_dicts,
+                                    candidate["index"], company_name,
+                                )
+                            )
                             fin_source = Source(
                                 company_id=company.id, url=url, title=title,
-                                document_type=source_type,
+                                document_type=source_type, s3_pdf_key=s3_pdf_key,
+                                screenshot_path=screenshot_path, html_snippet=html_snippet,
+                                page_number=page_number,
                             )
                             session.add(fin_source)
                             session.flush()

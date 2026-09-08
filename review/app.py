@@ -318,6 +318,9 @@ def render_data_table():
                 row["Scope 3"] = em.scope_3
                 if em.period_start and em.period_end:
                     row["Emissions Period"] = f"{em.period_start} to {em.period_end}"
+                em_source = session.query(Source).get(em.source_id) if em.source_id else None
+                row["Emissions Source URL"] = em_source.url if em_source else ""
+                row["Emissions Source Title"] = em_source.title if em_source else ""
             if fin:
                 row["Financial Status"] = fin.review_status
                 row["Revenue"] = fin.revenue
@@ -328,6 +331,9 @@ def render_data_table():
                 row["Currency"] = fin.currency
                 if fin.period_start and fin.period_end:
                     row["Financial Period"] = f"{fin.period_start} to {fin.period_end}"
+                fin_source = session.query(Source).get(fin.source_id) if fin.source_id else None
+                row["Financial Source URL"] = fin_source.url if fin_source else ""
+                row["Financial Source Title"] = fin_source.title if fin_source else ""
 
             export_rows.append(row)
 
@@ -555,6 +561,25 @@ def render_review():
             }))
             if fin_record.fiscal_year_end:
                 st.caption(f"As at fiscal year-end: {fin_record.fiscal_year_end}")
+
+        # Financial source info
+        fin_source = fin_record.source if fin_record.source_id else None
+        if fin_source:
+            st.markdown("**Financial source:**")
+            st.write(f"📄 {fin_source.title or 'Untitled'}")
+            st.write(f"Type: {fin_source.document_type}")
+            if fin_source.url:
+                st.markdown(f"[Open URL]({fin_source.url})")
+            if fin_source.page_number is not None:
+                st.caption(f"Page: {fin_source.page_number + 1}")
+
+            # Financial source preview
+            if fin_source.screenshot_path and os.path.exists(fin_source.screenshot_path):
+                st.markdown("**Financial source table (PDF screenshot):**")
+                st.image(fin_source.screenshot_path, use_container_width=True)
+            elif fin_source.html_snippet:
+                st.markdown("**Financial source table:**")
+                st.markdown(fin_source.html_snippet, unsafe_allow_html=True)
 
     # ── Review actions ─────────────────────────────────────────────────
     st.markdown("---")
