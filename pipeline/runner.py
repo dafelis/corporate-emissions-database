@@ -114,6 +114,38 @@ def _target_years():
     return set(range(TARGET_START_YEAR, _current_year() + 1))
 
 
+def _try_parse_candidates(candidates, searched_urls, llama_key, max_attempts=3):
+    """Try to parse documents from a ranked candidate list, skipping 403s.
+
+    Returns (url, title, source_type, table_dicts, tables_md) or raises if all fail.
+    """
+    attempts = 0
+    last_error = None
+
+    for candidate in candidates:
+        url = candidate["url"]
+        if url in searched_urls:
+            continue
+        if attempts >= max_attempts:
+            break
+
+        attempts += 1
+        searched_urls.add(url)
+        source_type = detect_source_type(url)
+        title = candidate["title"]
+
+        try:
+            table_dicts, tables_md = _parse_document(url, source_type, llama_key)
+            log.info(f"    Found: {title} ({source_type})")
+            return url, title, source_type, table_dicts, tables_md
+        except Exception as e:
+            log.warning(f"    {title}: {e} — trying next candidate")
+            last_error = e
+            continue
+
+    raise ValueError(f"All candidate URLs failed (last: {last_error})")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Emissions extraction (iterative)
 # ══════════════════════════════════════════════════════════════════════════
@@ -129,13 +161,10 @@ def _extract_emissions_round(
         company_name, anthropic_key, exa_key,
         target_year=target_year, exclude_urls=list(searched_urls),
     )
-    url = search_result["url"]
-    title = search_result["title"]
-    searched_urls.add(url)
-    source_type = detect_source_type(url)
-    log.info(f"    Found: {title} ({source_type})")
-
-    table_dicts, tables_md = _parse_document(url, source_type, llama_key)
+    candidates = search_result.get("candidates", [search_result])
+    url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
+        candidates, searched_urls, llama_key,
+    )
 
     extraction = None
     matched_table_idx = None
@@ -224,13 +253,10 @@ def _extract_financials_round(
         company_name, anthropic_key, exa_key,
         target_year=target_year, exclude_urls=list(searched_urls),
     )
-    url = fin_search["url"]
-    title = fin_search["title"]
-    searched_urls.add(url)
-    source_type = detect_source_type(url)
-    log.info(f"    Found: {title} ({source_type})")
-
-    table_dicts, tables_md = _parse_document(url, source_type, llama_key)
+    candidates = fin_search.get("candidates", [fin_search])
+    url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
+        candidates, searched_urls, llama_key,
+    )
 
     if not tables_md:
         return 0
@@ -376,14 +402,10 @@ def process_company(
                 company_name, anthropic_key, exa_key,
                 exclude_urls=list(fin_searched_urls),
             )
-            fin_searched_urls.add(fin_history_search["url"])
-            # Re-use the same extraction logic
-            url = fin_history_search["url"]
-            title = fin_history_search["title"]
-            source_type = detect_source_type(url)
-            log.info(f"    Found: {title} ({source_type})")
-
-            table_dicts, tables_md = _parse_document(url, source_type, llama_key)
+            candidates = fin_history_search.get("candidates", [fin_history_search])
+            url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
+                candidates, fin_searched_urls, llama_key,
+            )
             if tables_md:
                 ranked = find_financial_tables(tables_md, client)
                 top = [r for r in ranked if r["score"] >= 30]
