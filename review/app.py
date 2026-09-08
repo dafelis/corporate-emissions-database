@@ -142,6 +142,19 @@ def render_data_table():
         st.info("Select at least one data category in the sidebar.")
         return
 
+    # ── Year basis helper ─────────────────────────────────────────────
+    def year_basis(em, fin):
+        """Determine CY / FY / Other from period_end of either record."""
+        for rec in (em, fin):
+            if rec and rec.period_end:
+                m, d = rec.period_end.month, rec.period_end.day
+                if m == 12 and d == 31:
+                    return "CY"
+                if m == 3 and d == 31:
+                    return "FY"
+                return "Other"
+        return "—"
+
     # ── Format helpers ─────────────────────────────────────────────────
     def fmt_num(value):
         if value is None:
@@ -207,15 +220,16 @@ def render_data_table():
     <table class="data-table">
     """)
 
-    # Header row 1: year spans
+    # Header row 1: year spans (fields + 1 for "Basis" column)
     html_parts.append("<thead><tr><th rowspan='2'>Company</th>")
     for year in all_years:
-        html_parts.append(f"<th class='year-header' colspan='{len(fields)}'>{year}</th>")
+        html_parts.append(f"<th class='year-header' colspan='{len(fields) + 1}'>{year}</th>")
     html_parts.append("</tr>")
 
-    # Header row 2: field names
+    # Header row 2: field names with Basis first
     html_parts.append("<tr>")
     for year in all_years:
+        html_parts.append("<th>Basis</th>")
         for label, _, _ in fields:
             html_parts.append(f"<th>{label}</th>")
     html_parts.append("</tr></thead>")
@@ -236,6 +250,11 @@ def render_data_table():
         for year in all_years:
             em = em_by_key.get((company.id, year))
             fin = fin_by_key.get((company.id, year))
+
+            # Year basis column
+            basis = year_basis(em, fin)
+            basis_class = "not-approved" if basis == "—" else "approved"
+            html_parts.append(f"<td class='{basis_class}' style='text-align:center'>{basis}</td>")
 
             for label, field_name, source_type in fields:
                 if source_type == "emissions":
