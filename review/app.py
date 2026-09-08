@@ -143,17 +143,16 @@ def render_data_table():
         return
 
     # ── Year basis helper ─────────────────────────────────────────────
-    def year_basis(em, fin):
-        """Determine CY / FY / Other from period_end of either record."""
-        for rec in (em, fin):
-            if rec and rec.period_end:
-                m, d = rec.period_end.month, rec.period_end.day
-                if m == 12 and d == 31:
-                    return "CY"
-                if m == 3 and d == 31:
-                    return "FY"
-                return "Other"
-        return "—"
+    def record_basis(rec):
+        """Return e.g. 'CY 2025', 'FY 2026', 'Other' from a record's period_end."""
+        if not rec or not rec.period_end:
+            return "—"
+        m, d, y = rec.period_end.month, rec.period_end.day, rec.period_end.year
+        if m == 12 and d == 31:
+            return f"CY {y}"
+        if m == 3 and d == 31:
+            return f"FY {y}"
+        return "Other"
 
     # ── Format helpers ─────────────────────────────────────────────────
     def fmt_num(value):
@@ -220,18 +219,24 @@ def render_data_table():
     <table class="data-table">
     """)
 
-    # Header row 1: year spans (fields + 1 for "Basis" column)
+    # Count basis columns: 1 per visible category
+    n_basis = (1 if show_emissions else 0) + (1 if show_financials else 0)
+
+    # Header row 1: year spans
     html_parts.append("<thead><tr><th rowspan='2'>Company</th>")
     for year in all_years:
-        html_parts.append(f"<th class='year-header' colspan='{len(fields) + 1}'>{year}</th>")
+        html_parts.append(f"<th class='year-header' colspan='{len(fields) + n_basis}'>{year}</th>")
     html_parts.append("</tr>")
 
-    # Header row 2: field names with Basis last
+    # Header row 2: field names with basis columns at end
     html_parts.append("<tr>")
     for year in all_years:
         for label, _, _ in fields:
             html_parts.append(f"<th>{label}</th>")
-        html_parts.append("<th>Basis</th>")
+        if show_emissions:
+            html_parts.append("<th>Em. Basis</th>")
+        if show_financials:
+            html_parts.append("<th>Fin. Basis</th>")
     html_parts.append("</tr></thead>")
 
     # Data rows
@@ -265,10 +270,15 @@ def render_data_table():
                 else:
                     html_parts.append("<td class='no-data'>—</td>")
 
-            # Year basis column at end
-            basis = year_basis(em, fin)
-            basis_class = "not-approved" if basis == "—" else "approved"
-            html_parts.append(f"<td class='{basis_class}' style='text-align:center'>{basis}</td>")
+            # Basis columns at end
+            if show_emissions:
+                em_basis = record_basis(em)
+                em_basis_class = "not-approved" if em_basis == "—" else "approved"
+                html_parts.append(f"<td class='{em_basis_class}' style='text-align:center'>{em_basis}</td>")
+            if show_financials:
+                fin_basis = record_basis(fin)
+                fin_basis_class = "not-approved" if fin_basis == "—" else "approved"
+                html_parts.append(f"<td class='{fin_basis_class}' style='text-align:center'>{fin_basis}</td>")
 
         html_parts.append("</tr>")
 
