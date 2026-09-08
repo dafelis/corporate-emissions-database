@@ -17,7 +17,10 @@ from sqlalchemy import func
 
 load_dotenv()
 
-from db.models import Company, EmissionsRecord, FinancialRecord, Source, PipelineRun, get_session
+import json
+from datetime import datetime
+
+from db.models import Company, EmissionsRecord, FinancialRecord, Source, PipelineRun, ReviewHistory, get_session
 
 st.set_page_config(page_title="Emissions Data Review", layout="wide")
 st.title("Emissions Data Review")
@@ -268,34 +271,45 @@ if fin_record:
         if fin_record.fiscal_year_end:
             st.caption(f"As at fiscal year-end: {fin_record.fiscal_year_end}")
 
+# --- Helper: log review action ---
+def log_review(record_obj, record_type, old_status, new_status, notes="", field_changes=None):
+    """Write a row to review_history and update the record."""
+    record_obj.review_status = new_status
+    record_obj.reviewed_by = "reviewer"       # placeholder until auth is added
+    record_obj.reviewed_at = datetime.utcnow()
+
+    history = ReviewHistory(
+        record_type=record_type,
+        record_id=record_obj.id,
+        old_status=old_status,
+        new_status=new_status,
+        changed_by="reviewer",                # will become current user
+        changed_at=datetime.utcnow(),
+        notes=notes or None,
+        field_changes=json.dumps(field_changes) if field_changes else None,
+    )
+    session.add(history)
+    session.commit()
+
 # --- Review actions ---
 st.markdown("---")
 action_cols = st.columns(5)
 
 with action_cols[0]:
     if st.button("✓ Approve", type="primary", use_container_width=True):
-        record.review_status = "approved"
-        record.reviewed_by = "reviewer"
-        from datetime import datetime
-        record.reviewed_at = datetime.utcnow()
-        session.commit()
+        log_review(record, "emissions", record.review_status, "approved")
         st.session_state.review_index = min(idx + 1, len(records) - 1)
         st.rerun()
 
 with action_cols[1]:
     if st.button("✗ Reject", use_container_width=True):
-        record.review_status = "rejected"
-        record.reviewed_by = "reviewer"
-        from datetime import datetime
-        record.reviewed_at = datetime.utcnow()
-        session.commit()
+        log_review(record, "emissions", record.review_status, "rejected")
         st.session_state.review_index = min(idx + 1, len(records) - 1)
         st.rerun()
 
 with action_cols[2]:
     if st.button("⚑ Flag", use_container_width=True):
-        record.review_status = "flagged"
-        session.commit()
+        log_review(record, "emissions", record.review_status, "flagged")
         st.session_state.review_index = min(idx + 1, len(records) - 1)
         st.rerun()
 
@@ -324,15 +338,47 @@ with st.expander("Edit values"):
     notes = st.text_input("Review notes", value="")
 
     if st.button("Save edits"):
+        # Track what changed
+        changes = {}
+        for field, new_val in [("scope_1", new_s1), ("scope_2_location", new_s2l),
+                                ("scope_2_market", new_s2m), ("scope_3", new_s3)]:
+            old_val = getattr(record, field)
+            new_clean = new_val if new_val > 0 else None
+            if old_val != new_clean:
+                changes[field] = {"old": old_val, "new": new_clean}
+
         record.scope_1 = new_s1 if new_s1 > 0 else None
         record.scope_2_location = new_s2l if new_s2l > 0 else None
         record.scope_2_market = new_s2m if new_s2m > 0 else None
         record.scope_3 = new_s3 if new_s3 > 0 else None
-        if notes:
-            record.flag_reason = (record.flag_reason or "") + f"; Review note: {notes}"
-        session.commit()
+
+        log_review(record, "emissions", record.review_status, record.review_status,
+                   notes=notes, field_changes=changes if changes else None)
         st.success("Values updated")
         st.rerun()
+
+# --- Review history for this record ---
+history = (
+    session.query(ReviewHistory)
+    .filter_by(record_type="emissions", record_id=record.id)
+    .order_by(ReviewHistory.changed_at.desc())
+    .all()
+)
+if history:
+    with st.expander(f"Review history ({len(history)} entries)"):
+        for h in history:
+            ts = h.changed_at.strftime("%d %b %Y %H:%M") if h.changed_at else "—"
+            line = f"**{ts}** — {h.changed_by}: {h.old_status} → {h.new_status}"
+            if h.notes:
+                line += f"  \n_{h.notes}_"
+            if h.field_changes:
+                try:
+                    fc = json.loads(h.field_changes)
+                    edits = ", ".join(f"{k}: {v['old']}→{v['new']}" for k, v in fc.items())
+                    line += f"  \nEdits: {edits}"
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            st.markdown(line)
 
 # --- Overview table ---
 st.markdown("---")

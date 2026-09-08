@@ -162,6 +162,32 @@ class FinancialRecord(Base):
         return f"<FinancialRecord {self.company_id} year={self.reporting_year}>"
 
 
+class ReviewHistory(Base):
+    """Audit trail for every review action on emissions/financial records."""
+    __tablename__ = "review_history"
+
+    id = Column(Integer, primary_key=True)
+    record_type = Column(String(20), nullable=False)   # "emissions" or "financial"
+    record_id = Column(Integer, nullable=False)         # FK to emissions_records.id or financial_records.id
+    old_status = Column(String(20))                     # status before the change
+    new_status = Column(String(20), nullable=False)     # status after the change
+    changed_by = Column(String(100))                    # free text for now; will become FK to users table
+    user_id = Column(Integer)                           # reserved for future users table FK
+    changed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    notes = Column(Text)                                # reviewer's notes / reason for decision
+
+    # What values were on the record at the time of review (snapshot for audit)
+    field_changes = Column(Text)                        # JSON: {"scope_1": {"old": 100, "new": 95}} if edited
+
+    __table_args__ = (
+        Index("ix_review_record", "record_type", "record_id"),
+        Index("ix_review_user", "user_id"),
+    )
+
+    def __repr__(self):
+        return f"<ReviewHistory {self.record_type}:{self.record_id} {self.old_status}->{self.new_status}>"
+
+
 class PipelineRun(Base):
     """Tracks each execution of the pipeline."""
     __tablename__ = "pipeline_runs"
