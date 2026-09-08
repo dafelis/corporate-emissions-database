@@ -226,12 +226,12 @@ def render_data_table():
         html_parts.append(f"<th class='year-header' colspan='{len(fields) + 1}'>{year}</th>")
     html_parts.append("</tr>")
 
-    # Header row 2: field names with Basis first
+    # Header row 2: field names with Basis last
     html_parts.append("<tr>")
     for year in all_years:
-        html_parts.append("<th>Basis</th>")
         for label, _, _ in fields:
             html_parts.append(f"<th>{label}</th>")
+        html_parts.append("<th>Basis</th>")
     html_parts.append("</tr></thead>")
 
     # Data rows
@@ -251,11 +251,6 @@ def render_data_table():
             em = em_by_key.get((company.id, year))
             fin = fin_by_key.get((company.id, year))
 
-            # Year basis column
-            basis = year_basis(em, fin)
-            basis_class = "not-approved" if basis == "—" else "approved"
-            html_parts.append(f"<td class='{basis_class}' style='text-align:center'>{basis}</td>")
-
             for label, field_name, source_type in fields:
                 if source_type == "emissions":
                     value = getattr(em, field_name, None) if em else None
@@ -269,6 +264,11 @@ def render_data_table():
                     html_parts.append(f"<td class='{css_class}'>{fmt_num(value)}</td>")
                 else:
                     html_parts.append("<td class='no-data'>—</td>")
+
+            # Year basis column at end
+            basis = year_basis(em, fin)
+            basis_class = "not-approved" if basis == "—" else "approved"
+            html_parts.append(f"<td class='{basis_class}' style='text-align:center'>{basis}</td>")
 
         html_parts.append("</tr>")
 
