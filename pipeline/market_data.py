@@ -54,6 +54,19 @@ def get_equity_value_at_date(
             log.warning(f"  No shares outstanding data for {ticker}")
             return None
 
+        # Many exchanges report prices in minor currency units:
+        #   GBp (pence), ILA (Israeli agora), ZAc (SA cents)
+        # Convert to major currency so market cap is in pounds/ILS/ZAR etc.
+        minor_to_major = {
+            "GBp": ("GBP", 100),
+            "ILA": ("ILS", 100),
+            "ZAc": ("ZAR", 100),
+        }
+        if currency in minor_to_major:
+            major_currency, divisor = minor_to_major[currency]
+            price = price / divisor
+            currency = major_currency
+
         market_cap = price * shares
 
         return {
