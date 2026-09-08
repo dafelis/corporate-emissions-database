@@ -1,13 +1,14 @@
 """
 Main pipeline runner — processes companies one by one, extracting emissions,
 financial data, market data, and industry classifications.
+
+Searches iteratively for reports covering 2019 to present, filling gaps
+with year-targeted queries (up to MAX_SEARCHES per document type).
 """
 
 import logging
 import os
-import tempfile
 import time
-import traceback
 from datetime import datetime, date as date_type
 
 import anthropic
@@ -33,6 +34,14 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger(__name__)
+
+# ── Configuration ─────────────────────────────────────────────────────────
+TARGET_START_YEAR = 2019
+MAX_SEARCHES_PER_TYPE = 3  # max Exa searches per document type per company
+
+
+def _current_year():
+    return datetime.utcnow().year
 
 
 def _parse_document(url, source_type, llama_key):
@@ -84,6 +93,206 @@ def _capture_source_preview(url, source_type, table_dicts, matched_table_idx, co
     return screenshot_path, html_snippet, page_number, s3_pdf_key
 
 
+def _parse_date(date_str):
+    """Safely parse a YYYY-MM-DD string to a date, or return None."""
+    if not date_str:
+        return None
+    try:
+        return date_type.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        return None
+
+
+def _get_covered_years(session, company_id, model_class):
+    """Return the set of reporting_years already in the database."""
+    rows = session.query(model_class.reporting_year).filter_by(company_id=company_id).all()
+    return {r[0] for r in rows}
+
+
+def _target_years():
+    """Return the full set of years we want data for."""
+    return set(range(TARGET_START_YEAR, _current_year() + 1))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Emissions extraction (iterative)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _extract_emissions_round(
+    company, company_name, client, anthropic_key, exa_key, llama_key,
+    session, covered_years, searched_urls, target_year=None,
+):
+    """Run one search→parse→extract cycle for emissions. Returns count saved."""
+    saved = 0
+
+    search_result = search_for_emissions_source(
+        company_name, anthropic_key, exa_key,
+        target_year=target_year, exclude_urls=list(searched_urls),
+    )
+    url = search_result["url"]
+    title = search_result["title"]
+    searched_urls.add(url)
+    source_type = detect_source_type(url)
+    log.info(f"    Found: {title} ({source_type})")
+
+    table_dicts, tables_md = _parse_document(url, source_type, llama_key)
+
+    extraction = None
+    matched_table_idx = None
+    if tables_md:
+        ranked = find_emissions_tables(tables_md, client)
+        top_tables = [r for r in ranked if r["score"] >= 30]
+        if top_tables:
+            for candidate in top_tables[:3]:
+                try:
+                    extraction = extract_emissions(
+                        tables_md[candidate["index"]], company_name, client
+                    )
+                    if extraction.get("emissions"):
+                        matched_table_idx = candidate["index"]
+                        break
+                except Exception as e:
+                    log.warning(f"    Extraction failed for table {candidate['index']}: {e}")
+
+    # Fallback: extract from page text
+    if not extraction or not extraction.get("emissions"):
+        if source_type == "html":
+            log.info("    No tables, trying text fallback")
+            page_text = extract_html_text(url)
+            extraction = extract_emissions_from_text(page_text, company_name, client)
+
+    if extraction and extraction.get("emissions"):
+        # Capture source preview
+        screenshot_path, html_snippet, page_number, s3_pdf_key = (
+            _capture_source_preview(url, source_type, table_dicts, matched_table_idx, company_name)
+        )
+
+        source = Source(
+            company_id=company.id, url=url, title=title,
+            document_type=source_type, s3_pdf_key=s3_pdf_key,
+            screenshot_path=screenshot_path, html_snippet=html_snippet,
+            page_number=page_number,
+        )
+        session.add(source)
+        session.flush()
+
+        for entry in extraction["emissions"]:
+            year = entry["reporting_year"]
+
+            # Skip years outside target range or already covered
+            if year < TARGET_START_YEAR or year in covered_years:
+                continue
+
+            record = EmissionsRecord(
+                company_id=company.id,
+                reporting_year=year,
+                period_start=_parse_date(entry.get("period_start")),
+                period_end=_parse_date(entry.get("period_end")),
+                scope_1=entry.get("scope_1"),
+                scope_2_location=entry.get("scope_2_location"),
+                scope_2_market=entry.get("scope_2_market"),
+                scope_3=entry.get("scope_3"),
+                scope_3_categories=entry.get("scope_3_categories"),
+                unit=entry.get("unit", "tonnes CO2e"),
+                boundary=entry.get("boundary"),
+                methodology_notes=extraction.get("methodology_notes", ""),
+                source_id=source.id,
+                confidence_score=extraction.get("confidence_score"),
+                review_status="pending",
+            )
+            session.add(record)
+            covered_years.add(year)
+            saved += 1
+
+        session.commit()
+
+    return saved
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Financial extraction (iterative)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _extract_financials_round(
+    company, company_name, client, anthropic_key, exa_key, llama_key,
+    session, covered_years, searched_urls, target_year=None,
+):
+    """Run one search→parse→extract cycle for financials. Returns count saved."""
+    saved = 0
+
+    fin_search = search_for_annual_report(
+        company_name, anthropic_key, exa_key,
+        target_year=target_year, exclude_urls=list(searched_urls),
+    )
+    url = fin_search["url"]
+    title = fin_search["title"]
+    searched_urls.add(url)
+    source_type = detect_source_type(url)
+    log.info(f"    Found: {title} ({source_type})")
+
+    table_dicts, tables_md = _parse_document(url, source_type, llama_key)
+
+    if not tables_md:
+        return 0
+
+    ranked = find_financial_tables(tables_md, client)
+    top = [r for r in ranked if r["score"] >= 30]
+
+    if not top:
+        return 0
+
+    for candidate in top[:3]:
+        try:
+            fin_extraction = extract_financials(
+                tables_md[candidate["index"]], company_name, client
+            )
+            if fin_extraction.get("financials"):
+                fin_source = Source(
+                    company_id=company.id, url=url, title=title,
+                    document_type=source_type,
+                )
+                session.add(fin_source)
+                session.flush()
+
+                for entry in fin_extraction["financials"]:
+                    year = entry["reporting_year"]
+
+                    # Skip years outside target range or already covered
+                    if year < TARGET_START_YEAR or year in covered_years:
+                        continue
+
+                    multiplier = entry.get("unit_multiplier", 1) or 1
+
+                    fin_record = FinancialRecord(
+                        company_id=company.id,
+                        reporting_year=year,
+                        fiscal_year_end=_parse_date(entry.get("fiscal_year_end")),
+                        period_start=_parse_date(entry.get("period_start")),
+                        period_end=_parse_date(entry.get("period_end")),
+                        revenue=normalise_to_units(entry.get("revenue"), multiplier),
+                        outstanding_debt=normalise_to_units(entry.get("outstanding_debt"), multiplier),
+                        cash_and_equivalents=normalise_to_units(entry.get("cash_and_equivalents"), multiplier),
+                        currency=entry.get("currency"),
+                        source_id=fin_source.id,
+                        confidence_score=fin_extraction.get("confidence_score"),
+                        review_status="pending",
+                    )
+                    session.add(fin_record)
+                    covered_years.add(year)
+                    saved += 1
+
+                session.commit()
+                break  # found a good table, stop trying others
+        except Exception as e:
+            log.warning(f"    Financial extraction failed for table {candidate['index']}: {e}")
+
+    return saved
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Main per-company pipeline
+# ══════════════════════════════════════════════════════════════════════════
+
 def process_company(
     company: Company,
     anthropic_key: str,
@@ -91,13 +300,13 @@ def process_company(
     llama_key: str,
     session,
 ) -> dict:
-    """Process a single company: search, parse, extract, store.
+    """Process a single company: iteratively fill 2019–present data.
 
     Pipeline:
-    1. Search for sustainability report → extract emissions
-    2. Search for annual report → extract financials (revenue, debt, cash)
-    3. yfinance → equity value at fiscal year-end, industry info
-    4. Claude → map industry to NAICS/NACE/SIC
+    1. Iteratively search sustainability reports → extract emissions for all years
+    2. Iteratively search annual reports → extract financials for all years
+    3. yfinance → equity value at fiscal year-end for all financial records
+    4. Claude → industry classification (NAICS/NACE/SIC)
 
     Returns a dict with status and details.
     """
@@ -105,240 +314,102 @@ def process_company(
     company_name = company.name
     log.info(f"Processing: {company_name}")
 
-    # Skip if we already have emissions data for this company
-    existing_emissions = session.query(EmissionsRecord).filter_by(company_id=company.id).count()
-    existing_financials = session.query(FinancialRecord).filter_by(company_id=company.id).count()
+    target = _target_years()
     has_industry = company.yfinance_sector is not None
 
-    if existing_emissions > 0 and existing_financials > 0 and has_industry:
-        log.info(f"  Skipping: already have all data")
-        return {"status": "skipped"}
+    # ── PART 1: Emissions (iterative) ─────────────────────────────────────
 
-    # ── PART 1: Emissions ──────────────────────────────────────────────────
+    em_covered = _get_covered_years(session, company.id, EmissionsRecord)
+    em_missing = target - em_covered
+    em_searched_urls = set()
+    total_em_saved = 0
 
-    emissions_saved = 0
-    if existing_emissions == 0:
-        log.info("  Searching for emissions report...")
-        try:
-            search_result = search_for_emissions_source(company_name, anthropic_key, exa_key)
-            url = search_result["url"]
-            title = search_result["title"]
-            source_type = detect_source_type(url)
-            log.info(f"  Found emissions source: {title} ({source_type})")
+    if em_missing:
+        log.info(f"  Emissions: have {sorted(em_covered) or 'none'}, "
+                 f"missing {sorted(em_missing)}")
 
-            table_dicts, tables_md = _parse_document(url, source_type, llama_key)
+        search_count = 0
+        while em_missing and search_count < MAX_SEARCHES_PER_TYPE:
+            # First search: broad (latest). Subsequent: target oldest missing year.
+            target_year = min(em_missing) if search_count > 0 else None
+            year_label = f" (targeting {target_year})" if target_year else " (latest)"
 
-            extraction = None
-            matched_table_idx = None
-            if tables_md:
-                ranked = find_emissions_tables(tables_md, client)
-                top_tables = [r for r in ranked if r["score"] >= 30]
-                if top_tables:
-                    for candidate in top_tables[:3]:
-                        try:
-                            extraction = extract_emissions(
-                                tables_md[candidate["index"]], company_name, client
-                            )
-                            if extraction.get("emissions"):
-                                matched_table_idx = candidate["index"]
-                                break
-                        except Exception as e:
-                            log.warning(f"  Extraction failed for table {candidate['index']}: {e}")
-
-            # Fallback: extract from page text
-            if not extraction or not extraction.get("emissions"):
-                if source_type == "html":
-                    log.info("  No tables, trying text fallback")
-                    page_text = extract_html_text(url)
-                    extraction = extract_emissions_from_text(page_text, company_name, client)
-
-            if extraction and extraction.get("emissions"):
-                # Capture source preview
-                screenshot_path, html_snippet, page_number, s3_pdf_key = (
-                    _capture_source_preview(url, source_type, table_dicts, matched_table_idx, company_name)
+            log.info(f"  Emissions search {search_count + 1}/{MAX_SEARCHES_PER_TYPE}{year_label}")
+            try:
+                saved = _extract_emissions_round(
+                    company, company_name, client, anthropic_key, exa_key, llama_key,
+                    session, em_covered, em_searched_urls, target_year=target_year,
                 )
+                total_em_saved += saved
+                em_missing = target - em_covered
+                if saved == 0:
+                    break  # search found nothing new, stop
+            except Exception as e:
+                log.warning(f"    Emissions search failed: {e}")
+                session.rollback()
+                break
 
-                source = Source(
-                    company_id=company.id, url=url, title=title,
-                    document_type=source_type, s3_pdf_key=s3_pdf_key,
-                    screenshot_path=screenshot_path, html_snippet=html_snippet,
-                    page_number=page_number,
+            search_count += 1
+
+        if total_em_saved:
+            log.info(f"  Emissions: saved {total_em_saved} records "
+                     f"(covering {sorted(em_covered & target)})")
+        still_missing = target - em_covered
+        if still_missing:
+            log.info(f"  Emissions: no data found for years {sorted(still_missing)}")
+
+    # ── PART 2: Financials (iterative) ────────────────────────────────────
+
+    fin_covered = _get_covered_years(session, company.id, FinancialRecord)
+    fin_missing = target - fin_covered
+    fin_searched_urls = set()
+    total_fin_saved = 0
+
+    if fin_missing:
+        log.info(f"  Financials: have {sorted(fin_covered) or 'none'}, "
+                 f"missing {sorted(fin_missing)}")
+
+        search_count = 0
+        while fin_missing and search_count < MAX_SEARCHES_PER_TYPE:
+            target_year = min(fin_missing) if search_count > 0 else None
+            year_label = f" (targeting {target_year})" if target_year else " (latest)"
+
+            log.info(f"  Financial search {search_count + 1}/{MAX_SEARCHES_PER_TYPE}{year_label}")
+            try:
+                saved = _extract_financials_round(
+                    company, company_name, client, anthropic_key, exa_key, llama_key,
+                    session, fin_covered, fin_searched_urls, target_year=target_year,
                 )
-                session.add(source)
-                session.flush()
+                total_fin_saved += saved
+                fin_missing = target - fin_covered
+                if saved == 0:
+                    break
+            except Exception as e:
+                log.warning(f"    Financial search failed: {e}")
+                session.rollback()
+                break
 
-                for entry in extraction["emissions"]:
-                    # Parse period dates
-                    e_period_start = None
-                    e_period_end = None
-                    if entry.get("period_start"):
-                        try:
-                            e_period_start = date_type.fromisoformat(entry["period_start"])
-                        except (ValueError, TypeError):
-                            pass
-                    if entry.get("period_end"):
-                        try:
-                            e_period_end = date_type.fromisoformat(entry["period_end"])
-                        except (ValueError, TypeError):
-                            pass
+            search_count += 1
 
-                    record = EmissionsRecord(
-                        company_id=company.id,
-                        reporting_year=entry["reporting_year"],
-                        period_start=e_period_start,
-                        period_end=e_period_end,
-                        scope_1=entry.get("scope_1"),
-                        scope_2_location=entry.get("scope_2_location"),
-                        scope_2_market=entry.get("scope_2_market"),
-                        scope_3=entry.get("scope_3"),
-                        scope_3_categories=entry.get("scope_3_categories"),
-                        unit=entry.get("unit", "tonnes CO2e"),
-                        boundary=entry.get("boundary"),
-                        methodology_notes=extraction.get("methodology_notes", ""),
-                        source_id=source.id,
-                        confidence_score=extraction.get("confidence_score"),
-                        review_status="pending",
-                    )
-                    session.add(record)
-                    emissions_saved += 1
+        if total_fin_saved:
+            log.info(f"  Financials: saved {total_fin_saved} records "
+                     f"(covering {sorted(fin_covered & target)})")
+        still_missing = target - fin_covered
+        if still_missing:
+            log.info(f"  Financials: no data found for years {sorted(still_missing)}")
 
-                session.commit()
-                log.info(f"  Saved {emissions_saved} emissions records")
-            else:
-                log.warning(f"  No emissions data found for {company_name}")
+    # ── PART 3: Market data from yfinance ─────────────────────────────────
 
-        except Exception as e:
-            log.warning(f"  Emissions extraction failed: {e}")
-            session.rollback()
-
-    # ── PART 2: Financial data (separate search) ───────────────────────────
-
-    financials_saved = 0
-    if existing_financials == 0:
-        log.info("  Searching for annual report...")
-        try:
-            fin_search = search_for_annual_report(company_name, anthropic_key, exa_key)
-            fin_url = fin_search["url"]
-            fin_title = fin_search["title"]
-            fin_source_type = detect_source_type(fin_url)
-            log.info(f"  Found financial source: {fin_title} ({fin_source_type})")
-
-            fin_table_dicts, fin_tables_md = _parse_document(fin_url, fin_source_type, llama_key)
-
-            if fin_tables_md:
-                fin_ranked = find_financial_tables(fin_tables_md, client)
-                fin_top = [r for r in fin_ranked if r["score"] >= 30]
-
-                if fin_top:
-                    for candidate in fin_top[:3]:
-                        try:
-                            fin_extraction = extract_financials(
-                                fin_tables_md[candidate["index"]], company_name, client
-                            )
-                            if fin_extraction.get("financials"):
-                                # Save financial source
-                                fin_source = Source(
-                                    company_id=company.id, url=fin_url, title=fin_title,
-                                    document_type=fin_source_type,
-                                )
-                                session.add(fin_source)
-                                session.flush()
-
-                                for entry in fin_extraction["financials"]:
-                                    multiplier = entry.get("unit_multiplier", 1) or 1
-                                    fy_end = None
-                                    if entry.get("fiscal_year_end"):
-                                        try:
-                                            fy_end = date_type.fromisoformat(entry["fiscal_year_end"])
-                                        except (ValueError, TypeError):
-                                            pass
-
-                                    # Parse period dates
-                                    f_period_start = None
-                                    f_period_end = None
-                                    if entry.get("period_start"):
-                                        try:
-                                            f_period_start = date_type.fromisoformat(entry["period_start"])
-                                        except (ValueError, TypeError):
-                                            pass
-                                    if entry.get("period_end"):
-                                        try:
-                                            f_period_end = date_type.fromisoformat(entry["period_end"])
-                                        except (ValueError, TypeError):
-                                            pass
-
-                                    revenue = normalise_to_units(entry.get("revenue"), multiplier)
-                                    debt = normalise_to_units(entry.get("outstanding_debt"), multiplier)
-                                    cash = normalise_to_units(entry.get("cash_and_equivalents"), multiplier)
-
-                                    fin_record = FinancialRecord(
-                                        company_id=company.id,
-                                        reporting_year=entry["reporting_year"],
-                                        fiscal_year_end=fy_end,
-                                        period_start=f_period_start,
-                                        period_end=f_period_end,
-                                        revenue=revenue,
-                                        outstanding_debt=debt,
-                                        cash_and_equivalents=cash,
-                                        currency=entry.get("currency"),
-                                        source_id=fin_source.id,
-                                        confidence_score=fin_extraction.get("confidence_score"),
-                                        review_status="pending",
-                                    )
-                                    session.add(fin_record)
-                                    financials_saved += 1
-                                break
-                        except Exception as e:
-                            log.warning(f"  Financial extraction failed for table {candidate['index']}: {e}")
-
-                session.commit()
-                log.info(f"  Saved {financials_saved} financial records")
-
-        except Exception as e:
-            log.warning(f"  Financial data extraction failed: {e}")
-            session.rollback()
-
-    # ── PART 3: Market data from yfinance ──────────────────────────────────
-
-    if company.ticker and financials_saved > 0:
-        log.info("  Fetching market data from yfinance...")
-        try:
-            fin_records = (
-                session.query(FinancialRecord)
-                .filter_by(company_id=company.id)
-                .filter(FinancialRecord.equity_value.is_(None))
-                .all()
-            )
-            for fr in fin_records:
-                target_date = fr.fiscal_year_end or date_type(fr.reporting_year, 12, 31)
-                equity_data = get_equity_value_at_date(company.ticker, target_date)
-                if equity_data:
-                    fr.equity_value = equity_data["market_cap"]
-                    fr.shares_outstanding = equity_data["shares_outstanding"]
-                    fr.share_price_at_fy_end = equity_data["share_price"]
-                    fr.equity_currency = equity_data["currency"]
-                    # Calculate EV if we have all components
-                    if fr.outstanding_debt is not None and fr.cash_and_equivalents is not None:
-                        fr.enterprise_value = fr.equity_value + fr.outstanding_debt - fr.cash_and_equivalents
-                    log.info(f"  Market data for {fr.reporting_year}: "
-                             f"equity={fr.equity_value:,.0f} {fr.equity_currency}")
-
-            session.commit()
-        except Exception as e:
-            log.warning(f"  Market data fetch failed: {e}")
-            session.rollback()
-
-    elif company.ticker and existing_financials > 0:
-        # Backfill market data for existing financial records missing equity value
-        try:
-            fin_records = (
-                session.query(FinancialRecord)
-                .filter_by(company_id=company.id)
-                .filter(FinancialRecord.equity_value.is_(None))
-                .all()
-            )
-            if fin_records:
-                log.info("  Backfilling market data for existing financial records...")
+    if company.ticker:
+        fin_records = (
+            session.query(FinancialRecord)
+            .filter_by(company_id=company.id)
+            .filter(FinancialRecord.equity_value.is_(None))
+            .all()
+        )
+        if fin_records:
+            log.info(f"  Fetching market data for {len(fin_records)} financial records...")
+            try:
                 for fr in fin_records:
                     target_date = fr.fiscal_year_end or date_type(fr.reporting_year, 12, 31)
                     equity_data = get_equity_value_at_date(company.ticker, target_date)
@@ -348,13 +419,17 @@ def process_company(
                         fr.share_price_at_fy_end = equity_data["share_price"]
                         fr.equity_currency = equity_data["currency"]
                         if fr.outstanding_debt is not None and fr.cash_and_equivalents is not None:
-                            fr.enterprise_value = fr.equity_value + fr.outstanding_debt - fr.cash_and_equivalents
+                            fr.enterprise_value = (
+                                fr.equity_value + fr.outstanding_debt - fr.cash_and_equivalents
+                            )
+                        log.info(f"    {fr.reporting_year}: equity={fr.equity_value:,.0f} "
+                                 f"{fr.equity_currency}")
                 session.commit()
-        except Exception as e:
-            log.warning(f"  Market data backfill failed: {e}")
-            session.rollback()
+            except Exception as e:
+                log.warning(f"  Market data fetch failed: {e}")
+                session.rollback()
 
-    # ── PART 4: Industry classification ────────────────────────────────────
+    # ── PART 4: Industry classification ───────────────────────────────────
 
     if not has_industry and company.ticker:
         log.info("  Looking up industry classification...")
@@ -365,7 +440,6 @@ def process_company(
                 company.yfinance_industry = industry_info["industry"]
                 log.info(f"  Industry: {industry_info['sector']} / {industry_info['industry']}")
 
-                # Map to NAICS/NACE/SIC using Claude
                 classification = classify_company(
                     company_name,
                     industry_info["sector"],
@@ -387,12 +461,21 @@ def process_company(
         except Exception as e:
             log.warning(f"  Industry classification failed: {e}")
 
+    # ── Result ────────────────────────────────────────────────────────────
+
+    if total_em_saved == 0 and total_fin_saved == 0 and not em_missing and not fin_missing:
+        return {"status": "skipped"}
+
     return {
         "status": "success",
-        "emissions_records": emissions_saved,
-        "financial_records": financials_saved,
+        "emissions_records": total_em_saved,
+        "financial_records": total_fin_saved,
     }
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# Pipeline orchestration
+# ══════════════════════════════════════════════════════════════════════════
 
 def run_pipeline(
     database_url: str,
@@ -402,27 +485,17 @@ def run_pipeline(
     company_ids: list[int] = None,
     delay_between: float = 2.0,
 ):
-    """Run the full pipeline across all (or specified) companies.
-
-    Args:
-        database_url: PostgreSQL connection string
-        anthropic_key: Anthropic API key
-        exa_key: Exa API key
-        llama_key: LlamaParse API key
-        company_ids: Optional list of company IDs to process (default: all)
-        delay_between: Seconds to wait between companies (rate limiting)
-    """
+    """Run the full pipeline across all (or specified) companies."""
     session = get_session(database_url)
 
-    # Load companies
     if company_ids:
         companies = session.query(Company).filter(Company.id.in_(company_ids)).all()
     else:
         companies = session.query(Company).all()
 
-    log.info(f"Starting pipeline for {len(companies)} companies")
+    log.info(f"Starting pipeline for {len(companies)} companies "
+             f"(target years: {TARGET_START_YEAR}–{_current_year()})")
 
-    # Create pipeline run record
     run = PipelineRun(
         total_companies=len(companies),
         status="running",
@@ -449,11 +522,9 @@ def run_pipeline(
             n_failed += 1
             session.rollback()
 
-        # Rate limiting
         if i < len(companies) - 1:
             time.sleep(delay_between)
 
-        # Update run record periodically
         if (i + 1) % 10 == 0:
             run.successful = n_success
             run.failed = n_failed

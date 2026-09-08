@@ -104,10 +104,11 @@ def render_data_table():
     for f in financials:
         fin_by_key[(f.company_id, f.reporting_year)] = f
 
-    # Collect all years across both datasets
-    all_years = sorted({e.reporting_year for e in emissions} | {f.reporting_year for f in financials})
+    # Show all years from 2019 to present (matching pipeline target range)
+    current_year = datetime.utcnow().year
+    all_years = list(range(2019, current_year + 1))
 
-    if not all_years:
+    if not emissions and not financials:
         st.info("No data extracted yet.")
         return
 
