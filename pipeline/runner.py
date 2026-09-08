@@ -473,12 +473,15 @@ def process_company(
             session.rollback()
 
         # Searches 2+: targeted annual reports for remaining gaps
+        # Always target the oldest missing year — the five-year summary above
+        # already did the broad search, so an untargeted search here would just
+        # find overlapping recent documents and cause an early break.
         search_count = 0
         while fin_missing and search_count < MAX_SEARCHES_PER_TYPE:
-            target_year = min(fin_missing) if search_count > 0 else None
-            year_label = f" (targeting {target_year})" if target_year else " (latest)"
+            target_year = min(fin_missing)
 
-            log.info(f"  Financial search {search_count + 2}/{MAX_SEARCHES_PER_TYPE + 1}{year_label}")
+            log.info(f"  Financial search {search_count + 2}/{MAX_SEARCHES_PER_TYPE + 1} "
+                     f"(targeting {target_year})")
             try:
                 saved = _extract_financials_round(
                     company, company_name, client, anthropic_key, exa_key, llama_key,
