@@ -185,3 +185,36 @@ def search_for_annual_report(
         anthropic_key=anthropic_key,
         exclude_urls=exclude_urls,
     )
+
+
+def search_for_financial_history(
+    company_name: str,
+    anthropic_key: str,
+    exa_key: str,
+    exclude_urls: list[str] = None,
+) -> dict:
+    """Search for a multi-year financial summary (five-year record, key financials page).
+
+    Many companies publish a consolidated financial history that covers 5-10 years
+    in a single table — much more efficient than finding individual annual reports.
+    """
+    return _search_and_rank(
+        search_query=(
+            f"{company_name} five year summary financial history "
+            "key financials revenue debt historical performance"
+        ),
+        ranking_prompt=(
+            f"I'm looking for a multi-year financial summary or five-year record "
+            f"for '{company_name}' — a single page or document that shows revenue, "
+            "debt, and/or cash across MULTIPLE years (ideally 5+ years).\n\n"
+            "Rank these from most to least likely to contain multi-year financial data. "
+            "Strongly prefer: five-year summaries, key financial highlights pages, "
+            "investor fact sheets with historical data, or annual report sections "
+            "titled 'Financial History' or 'Five Year Record'. "
+            "These are more valuable than a single year's annual report. "
+            "Include only results likely to contain multi-year data."
+        ),
+        exa_key=exa_key,
+        anthropic_key=anthropic_key,
+        exclude_urls=exclude_urls,
+    )

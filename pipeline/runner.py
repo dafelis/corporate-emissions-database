@@ -17,7 +17,7 @@ from db.models import (
     Company, EmissionsRecord, FinancialRecord, Source, PipelineRun,
     get_session, create_tables,
 )
-from pipeline.searcher import search_for_emissions_source, search_for_annual_report
+from pipeline.searcher import search_for_emissions_source, search_for_annual_report, search_for_financial_history
 from pipeline.parser import (
     parse_pdf, extract_tables_from_documents, parse_html, parse_excel,
     extract_html_text, detect_source_type, download_to_tempfile,
@@ -369,12 +369,76 @@ def process_company(
         log.info(f"  Financials: have {sorted(fin_covered) or 'none'}, "
                  f"missing {sorted(fin_missing)}")
 
+        # Search 1: try a five-year financial summary first (covers most years in one hit)
+        log.info(f"  Financial search 1/{MAX_SEARCHES_PER_TYPE + 1} (five-year summary)")
+        try:
+            fin_history_search = search_for_financial_history(
+                company_name, anthropic_key, exa_key,
+                exclude_urls=list(fin_searched_urls),
+            )
+            fin_searched_urls.add(fin_history_search["url"])
+            # Re-use the same extraction logic
+            url = fin_history_search["url"]
+            title = fin_history_search["title"]
+            source_type = detect_source_type(url)
+            log.info(f"    Found: {title} ({source_type})")
+
+            table_dicts, tables_md = _parse_document(url, source_type, llama_key)
+            if tables_md:
+                ranked = find_financial_tables(tables_md, client)
+                top = [r for r in ranked if r["score"] >= 30]
+                for candidate in top[:3]:
+                    try:
+                        fin_extraction = extract_financials(
+                            tables_md[candidate["index"]], company_name, client
+                        )
+                        if fin_extraction.get("financials"):
+                            fin_source = Source(
+                                company_id=company.id, url=url, title=title,
+                                document_type=source_type,
+                            )
+                            session.add(fin_source)
+                            session.flush()
+
+                            for entry in fin_extraction["financials"]:
+                                year = entry["reporting_year"]
+                                if year < TARGET_START_YEAR or year in fin_covered:
+                                    continue
+                                multiplier = entry.get("unit_multiplier", 1) or 1
+                                fin_record = FinancialRecord(
+                                    company_id=company.id,
+                                    reporting_year=year,
+                                    fiscal_year_end=_parse_date(entry.get("fiscal_year_end")),
+                                    period_start=_parse_date(entry.get("period_start")),
+                                    period_end=_parse_date(entry.get("period_end")),
+                                    revenue=normalise_to_units(entry.get("revenue"), multiplier),
+                                    outstanding_debt=normalise_to_units(entry.get("outstanding_debt"), multiplier),
+                                    cash_and_equivalents=normalise_to_units(entry.get("cash_and_equivalents"), multiplier),
+                                    currency=entry.get("currency"),
+                                    source_id=fin_source.id,
+                                    confidence_score=fin_extraction.get("confidence_score"),
+                                    review_status="pending",
+                                )
+                                session.add(fin_record)
+                                fin_covered.add(year)
+                                total_fin_saved += 1
+                            session.commit()
+                            break
+                    except Exception as e:
+                        log.warning(f"    Financial extraction failed for table {candidate['index']}: {e}")
+
+            fin_missing = target - fin_covered
+        except Exception as e:
+            log.warning(f"    Five-year summary search failed: {e}")
+            session.rollback()
+
+        # Searches 2+: targeted annual reports for remaining gaps
         search_count = 0
         while fin_missing and search_count < MAX_SEARCHES_PER_TYPE:
             target_year = min(fin_missing) if search_count > 0 else None
             year_label = f" (targeting {target_year})" if target_year else " (latest)"
 
-            log.info(f"  Financial search {search_count + 1}/{MAX_SEARCHES_PER_TYPE}{year_label}")
+            log.info(f"  Financial search {search_count + 2}/{MAX_SEARCHES_PER_TYPE + 1}{year_label}")
             try:
                 saved = _extract_financials_round(
                     company, company_name, client, anthropic_key, exa_key, llama_key,
