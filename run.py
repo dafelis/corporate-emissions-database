@@ -128,9 +128,12 @@ def cmd_init(args):
     session.commit()
     print(f"\nAdded {added} companies to database ({len(existing)} already existed)")
 
-    # Backfill LEIs for existing companies that don't have one
+    # Backfill LEIs for existing companies that don't have one (or have LEI but missing metadata)
     if not args.skip_lei:
-        no_lei = session.query(Company).filter(Company.lei.is_(None)).all()
+        from sqlalchemy import or_
+        no_lei = session.query(Company).filter(
+            or_(Company.lei.is_(None), Company.lei_legal_name.is_(None))
+        ).all()
         if no_lei:
             print(f"\nBackfilling LEIs for {len(no_lei)} companies...")
             for company in no_lei:
