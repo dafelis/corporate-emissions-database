@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────
 TARGET_START_YEAR = 2019
-MAX_SEARCHES_PER_TYPE = 3  # max Exa searches per document type per company
+MAX_SEARCHES_PER_TYPE = 5  # max Exa searches per document type per company
 
 
 def _current_year():
