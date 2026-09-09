@@ -273,7 +273,7 @@ def _extract_emissions_round(
         ranked = find_emissions_tables(tables_md, client)
         top_tables = [r for r in ranked if r["score"] >= 30]
         if top_tables:
-            for candidate_tbl in top_tables[:5]:
+            for candidate_tbl in top_tables[:10]:
                 try:
                     extraction = extract_emissions(
                         tables_md[candidate_tbl["index"]], company_name, client,
@@ -431,7 +431,7 @@ def _extract_financials_from_document(
     matched_table_idx = None
     best_confidence = 0
 
-    for candidate_tbl in top[:5]:
+    for candidate_tbl in top[:10]:
         try:
             fin_extraction = extract_financials(
                 tables_md[candidate_tbl["index"]], company_name, client,
