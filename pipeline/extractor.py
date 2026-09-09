@@ -126,7 +126,10 @@ def extract_emissions(
         system=(
             "You are an expert at extracting greenhouse gas emissions data from tables "
             "in sustainability reports. Extract Scope 1, Scope 2 (both location-based and "
-            "market-based if available), and Scope 3 emissions for ALL years present in the table. "
+            "market-based if available), and Scope 3 emissions for EVERY year present in the "
+            "table — including prior-year comparison columns and historical trend data. "
+            "Many reports show 2-5 years side by side; extract ALL of them, not just the "
+            "most recent. "
             "Normalise all values to the same unit (prefer tonnes CO2e). "
             "If the table uses kt or Mt, convert to tonnes. "
             "IMPORTANT: Identify the reporting period for each year. Look for phrases like "

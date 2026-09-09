@@ -154,7 +154,12 @@ def _extract_emissions_round(
     company, company_name, client, anthropic_key, exa_key, llama_key,
     session, covered_years, searched_urls, target_year=None,
 ):
-    """Run one search→parse→extract cycle for emissions. Returns count saved."""
+    """Run one search→parse→extract cycle for emissions. Returns count saved.
+
+    Tries ALL high-scoring tables in the document, accumulating unique years
+    across them (a trend table, a detailed scope table, and a Scope 3
+    breakdown may each contribute different years).
+    """
     saved = 0
 
     search_result = search_for_emissions_source(
@@ -166,31 +171,56 @@ def _extract_emissions_round(
         candidates, searched_urls, llama_key,
     )
 
-    extraction = None
+    # Accumulate emissions from ALL high-scoring tables
+    all_entries = []
+    seen_years = set()
     matched_table_idx = None
+    best_confidence = 0
+    methodology_notes = ""
+
     if tables_md:
         ranked = find_emissions_tables(tables_md, client)
         top_tables = [r for r in ranked if r["score"] >= 30]
         if top_tables:
-            for candidate in top_tables[:3]:
+            for candidate_tbl in top_tables[:5]:
                 try:
                     extraction = extract_emissions(
-                        tables_md[candidate["index"]], company_name, client
+                        tables_md[candidate_tbl["index"]], company_name, client
                     )
                     if extraction.get("emissions"):
-                        matched_table_idx = candidate["index"]
-                        break
+                        if matched_table_idx is None:
+                            matched_table_idx = candidate_tbl["index"]
+                            methodology_notes = extraction.get("methodology_notes", "")
+
+                        confidence = extraction.get("confidence_score", 0) or 0
+                        if confidence > best_confidence:
+                            best_confidence = confidence
+
+                        new_this_table = 0
+                        for entry in extraction["emissions"]:
+                            year = entry["reporting_year"]
+                            if year not in seen_years:
+                                all_entries.append(entry)
+                                seen_years.add(year)
+                                new_this_table += 1
+
+                        log.info(f"    Table {candidate_tbl['index']}: "
+                                 f"{new_this_table} new year(s), "
+                                 f"total so far {sorted(seen_years)}")
                 except Exception as e:
-                    log.warning(f"    Extraction failed for table {candidate['index']}: {e}")
+                    log.warning(f"    Extraction failed for table {candidate_tbl['index']}: {e}")
 
     # Fallback: extract from page text
-    if not extraction or not extraction.get("emissions"):
-        if source_type == "html":
-            log.info("    No tables, trying text fallback")
-            page_text = extract_html_text(url)
-            extraction = extract_emissions_from_text(page_text, company_name, client)
+    if not all_entries and source_type == "html":
+        log.info("    No table results, trying text fallback")
+        page_text = extract_html_text(url)
+        extraction = extract_emissions_from_text(page_text, company_name, client)
+        if extraction and extraction.get("emissions"):
+            all_entries = extraction["emissions"]
+            best_confidence = extraction.get("confidence_score", 0) or 0
+            methodology_notes = extraction.get("methodology_notes", "")
 
-    if extraction and extraction.get("emissions"):
+    if all_entries:
         # Capture source preview
         screenshot_path, html_snippet, page_number, s3_pdf_key = (
             _capture_source_preview(url, source_type, table_dicts, matched_table_idx, company_name)
@@ -205,10 +235,8 @@ def _extract_emissions_round(
         session.add(source)
         session.flush()
 
-        for entry in extraction["emissions"]:
+        for entry in all_entries:
             year = entry["reporting_year"]
-
-            # Skip years outside target range or already covered
             if year < TARGET_START_YEAR or year in covered_years:
                 continue
 
@@ -224,9 +252,9 @@ def _extract_emissions_round(
                 scope_3_categories=entry.get("scope_3_categories"),
                 unit=entry.get("unit", "tonnes CO2e"),
                 boundary=entry.get("boundary"),
-                methodology_notes=extraction.get("methodology_notes", ""),
+                methodology_notes=methodology_notes,
                 source_id=source.id,
-                confidence_score=extraction.get("confidence_score"),
+                confidence_score=best_confidence,
                 review_status="pending",
             )
             session.add(record)
@@ -239,16 +267,117 @@ def _extract_emissions_round(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Financial extraction (iterative)
+# Financial extraction (shared helper + iterative round)
 # ══════════════════════════════════════════════════════════════════════════
+
+def _extract_financials_from_document(
+    url, title, source_type, table_dicts, tables_md,
+    company, company_name, client, session, covered_years,
+):
+    """Extract financial data from ALL high-scoring tables in a parsed document.
+
+    Tries up to 5 tables and merges results by year — revenue may come from
+    the income statement while debt/cash come from the balance sheet.
+    Returns count of new records saved.
+    """
+    if not tables_md:
+        return 0
+
+    ranked = find_financial_tables(tables_md, client)
+    top = [r for r in ranked if r["score"] >= 30]
+    if not top:
+        return 0
+
+    entries_by_year = {}  # year -> merged entry dict
+    matched_table_idx = None
+    best_confidence = 0
+
+    for candidate_tbl in top[:5]:
+        try:
+            fin_extraction = extract_financials(
+                tables_md[candidate_tbl["index"]], company_name, client
+            )
+            if fin_extraction.get("financials"):
+                if matched_table_idx is None:
+                    matched_table_idx = candidate_tbl["index"]
+
+                confidence = fin_extraction.get("confidence_score", 0) or 0
+                if confidence > best_confidence:
+                    best_confidence = confidence
+
+                new_this_table = 0
+                for entry in fin_extraction["financials"]:
+                    year = entry["reporting_year"]
+                    if year in entries_by_year:
+                        # Merge: fill in null fields from existing entry
+                        existing = entries_by_year[year]
+                        for key, val in entry.items():
+                            if key == "reporting_year":
+                                continue
+                            if existing.get(key) is None and val is not None:
+                                existing[key] = val
+                    else:
+                        entries_by_year[year] = dict(entry)
+                        new_this_table += 1
+
+                log.info(f"    Table {candidate_tbl['index']}: "
+                         f"{new_this_table} new year(s), "
+                         f"total so far {sorted(entries_by_year.keys())}")
+        except Exception as e:
+            log.warning(f"    Financial extraction failed for table {candidate_tbl['index']}: {e}")
+
+    if not entries_by_year:
+        return 0
+
+    # Capture source preview
+    screenshot_path, html_snippet, page_number, s3_pdf_key = (
+        _capture_source_preview(url, source_type, table_dicts, matched_table_idx, company_name)
+    )
+
+    fin_source = Source(
+        company_id=company.id, url=url, title=title,
+        document_type=source_type, s3_pdf_key=s3_pdf_key,
+        screenshot_path=screenshot_path, html_snippet=html_snippet,
+        page_number=page_number,
+    )
+    session.add(fin_source)
+    session.flush()
+
+    saved = 0
+    for entry in entries_by_year.values():
+        year = entry["reporting_year"]
+        if year < TARGET_START_YEAR or year in covered_years:
+            continue
+
+        multiplier = entry.get("unit_multiplier", 1) or 1
+
+        fin_record = FinancialRecord(
+            company_id=company.id,
+            reporting_year=year,
+            fiscal_year_end=_parse_date(entry.get("fiscal_year_end")),
+            period_start=_parse_date(entry.get("period_start")),
+            period_end=_parse_date(entry.get("period_end")),
+            revenue=normalise_to_units(entry.get("revenue"), multiplier),
+            outstanding_debt=normalise_to_units(entry.get("outstanding_debt"), multiplier),
+            cash_and_equivalents=normalise_to_units(entry.get("cash_and_equivalents"), multiplier),
+            currency=entry.get("currency"),
+            source_id=fin_source.id,
+            confidence_score=best_confidence,
+            review_status="pending",
+        )
+        session.add(fin_record)
+        covered_years.add(year)
+        saved += 1
+
+    session.commit()
+    return saved
+
 
 def _extract_financials_round(
     company, company_name, client, anthropic_key, exa_key, llama_key,
     session, covered_years, searched_urls, target_year=None,
 ):
     """Run one search→parse→extract cycle for financials. Returns count saved."""
-    saved = 0
-
     fin_search = search_for_annual_report(
         company_name, anthropic_key, exa_key,
         target_year=target_year, exclude_urls=list(searched_urls),
@@ -257,72 +386,10 @@ def _extract_financials_round(
     url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
         candidates, searched_urls, llama_key,
     )
-
-    if not tables_md:
-        return 0
-
-    ranked = find_financial_tables(tables_md, client)
-    top = [r for r in ranked if r["score"] >= 30]
-
-    if not top:
-        return 0
-
-    for candidate in top[:3]:
-        try:
-            fin_extraction = extract_financials(
-                tables_md[candidate["index"]], company_name, client
-            )
-            if fin_extraction.get("financials"):
-                # Capture source preview for financial document
-                screenshot_path, html_snippet, page_number, s3_pdf_key = (
-                    _capture_source_preview(
-                        url, source_type, table_dicts,
-                        candidate["index"], company_name,
-                    )
-                )
-
-                fin_source = Source(
-                    company_id=company.id, url=url, title=title,
-                    document_type=source_type, s3_pdf_key=s3_pdf_key,
-                    screenshot_path=screenshot_path, html_snippet=html_snippet,
-                    page_number=page_number,
-                )
-                session.add(fin_source)
-                session.flush()
-
-                for entry in fin_extraction["financials"]:
-                    year = entry["reporting_year"]
-
-                    # Skip years outside target range or already covered
-                    if year < TARGET_START_YEAR or year in covered_years:
-                        continue
-
-                    multiplier = entry.get("unit_multiplier", 1) or 1
-
-                    fin_record = FinancialRecord(
-                        company_id=company.id,
-                        reporting_year=year,
-                        fiscal_year_end=_parse_date(entry.get("fiscal_year_end")),
-                        period_start=_parse_date(entry.get("period_start")),
-                        period_end=_parse_date(entry.get("period_end")),
-                        revenue=normalise_to_units(entry.get("revenue"), multiplier),
-                        outstanding_debt=normalise_to_units(entry.get("outstanding_debt"), multiplier),
-                        cash_and_equivalents=normalise_to_units(entry.get("cash_and_equivalents"), multiplier),
-                        currency=entry.get("currency"),
-                        source_id=fin_source.id,
-                        confidence_score=fin_extraction.get("confidence_score"),
-                        review_status="pending",
-                    )
-                    session.add(fin_record)
-                    covered_years.add(year)
-                    saved += 1
-
-                session.commit()
-                break  # found a good table, stop trying others
-        except Exception as e:
-            log.warning(f"    Financial extraction failed for table {candidate['index']}: {e}")
-
-    return saved
+    return _extract_financials_from_document(
+        url, title, source_type, table_dicts, tables_md,
+        company, company_name, client, session, covered_years,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -365,10 +432,20 @@ def process_company(
                  f"missing {sorted(em_missing)}")
 
         search_count = 0
+        consecutive_empty = 0
         while em_missing and search_count < MAX_SEARCHES_PER_TYPE:
-            # First search: broad (latest). Subsequent: target oldest missing year.
-            target_year = min(em_missing) if search_count > 0 else None
-            year_label = f" (targeting {target_year})" if target_year else " (latest)"
+            # First search: broad (latest).
+            # Subsequent: alternate oldest / newest missing year to attack gaps
+            # from both ends.
+            if search_count == 0:
+                target_year = None
+                year_label = " (latest)"
+            elif search_count % 2 == 1:
+                target_year = min(em_missing)
+                year_label = f" (oldest missing: {target_year})"
+            else:
+                target_year = max(em_missing)
+                year_label = f" (newest missing: {target_year})"
 
             log.info(f"  Emissions search {search_count + 1}/{MAX_SEARCHES_PER_TYPE}{year_label}")
             try:
@@ -379,11 +456,18 @@ def process_company(
                 total_em_saved += saved
                 em_missing = target - em_covered
                 if saved == 0:
-                    break  # search found nothing new, stop
+                    consecutive_empty += 1
+                    if consecutive_empty >= 2:
+                        log.info("    Two consecutive empty searches, stopping")
+                        break
+                else:
+                    consecutive_empty = 0
             except Exception as e:
                 log.warning(f"    Emissions search failed: {e}")
                 session.rollback()
-                break
+                consecutive_empty += 1
+                if consecutive_empty >= 2:
+                    break
 
             search_count += 1
 
@@ -416,72 +500,30 @@ def process_company(
             url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
                 candidates, fin_searched_urls, llama_key,
             )
-            if tables_md:
-                ranked = find_financial_tables(tables_md, client)
-                top = [r for r in ranked if r["score"] >= 30]
-                for candidate in top[:3]:
-                    try:
-                        fin_extraction = extract_financials(
-                            tables_md[candidate["index"]], company_name, client
-                        )
-                        if fin_extraction.get("financials"):
-                            screenshot_path, html_snippet, page_number, s3_pdf_key = (
-                                _capture_source_preview(
-                                    url, source_type, table_dicts,
-                                    candidate["index"], company_name,
-                                )
-                            )
-                            fin_source = Source(
-                                company_id=company.id, url=url, title=title,
-                                document_type=source_type, s3_pdf_key=s3_pdf_key,
-                                screenshot_path=screenshot_path, html_snippet=html_snippet,
-                                page_number=page_number,
-                            )
-                            session.add(fin_source)
-                            session.flush()
-
-                            for entry in fin_extraction["financials"]:
-                                year = entry["reporting_year"]
-                                if year < TARGET_START_YEAR or year in fin_covered:
-                                    continue
-                                multiplier = entry.get("unit_multiplier", 1) or 1
-                                fin_record = FinancialRecord(
-                                    company_id=company.id,
-                                    reporting_year=year,
-                                    fiscal_year_end=_parse_date(entry.get("fiscal_year_end")),
-                                    period_start=_parse_date(entry.get("period_start")),
-                                    period_end=_parse_date(entry.get("period_end")),
-                                    revenue=normalise_to_units(entry.get("revenue"), multiplier),
-                                    outstanding_debt=normalise_to_units(entry.get("outstanding_debt"), multiplier),
-                                    cash_and_equivalents=normalise_to_units(entry.get("cash_and_equivalents"), multiplier),
-                                    currency=entry.get("currency"),
-                                    source_id=fin_source.id,
-                                    confidence_score=fin_extraction.get("confidence_score"),
-                                    review_status="pending",
-                                )
-                                session.add(fin_record)
-                                fin_covered.add(year)
-                                total_fin_saved += 1
-                            session.commit()
-                            break
-                    except Exception as e:
-                        log.warning(f"    Financial extraction failed for table {candidate['index']}: {e}")
-
+            saved = _extract_financials_from_document(
+                url, title, source_type, table_dicts, tables_md,
+                company, company_name, client, session, fin_covered,
+            )
+            total_fin_saved += saved
             fin_missing = target - fin_covered
         except Exception as e:
             log.warning(f"    Five-year summary search failed: {e}")
             session.rollback()
 
-        # Searches 2+: targeted annual reports for remaining gaps
-        # Always target the oldest missing year — the five-year summary above
-        # already did the broad search, so an untargeted search here would just
-        # find overlapping recent documents and cause an early break.
+        # Searches 2+: targeted annual reports for remaining gaps.
+        # Alternate oldest / newest missing year to attack gaps from both ends.
         search_count = 0
+        consecutive_empty = 0
         while fin_missing and search_count < MAX_SEARCHES_PER_TYPE:
-            target_year = min(fin_missing)
+            if search_count % 2 == 0:
+                target_year = min(fin_missing)
+                year_label = f"oldest missing: {target_year}"
+            else:
+                target_year = max(fin_missing)
+                year_label = f"newest missing: {target_year}"
 
             log.info(f"  Financial search {search_count + 2}/{MAX_SEARCHES_PER_TYPE + 1} "
-                     f"(targeting {target_year})")
+                     f"({year_label})")
             try:
                 saved = _extract_financials_round(
                     company, company_name, client, anthropic_key, exa_key, llama_key,
@@ -490,11 +532,18 @@ def process_company(
                 total_fin_saved += saved
                 fin_missing = target - fin_covered
                 if saved == 0:
-                    break
+                    consecutive_empty += 1
+                    if consecutive_empty >= 2:
+                        log.info("    Two consecutive empty searches, stopping")
+                        break
+                else:
+                    consecutive_empty = 0
             except Exception as e:
                 log.warning(f"    Financial search failed: {e}")
                 session.rollback()
-                break
+                consecutive_empty += 1
+                if consecutive_empty >= 2:
+                    break
 
             search_count += 1
 

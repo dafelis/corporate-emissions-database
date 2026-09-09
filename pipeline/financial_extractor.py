@@ -150,8 +150,9 @@ def extract_financials(
         system=(
             "You are an expert at extracting financial data from company annual reports. "
             "Extract revenue (turnover/net sales), total outstanding debt (borrowings, "
-            "both current and non-current), and cash & cash equivalents for ALL years "
-            "present in the table. "
+            "both current and non-current), and cash & cash equivalents for EVERY year "
+            "present in the table — including all historical/prior-year columns. "
+            "Many financial tables show 2-10 years of data; extract ALL of them. "
             "IMPORTANT: Check what unit the table uses (thousands, millions, billions) — "
             "this is usually stated in the table header or a note. Set unit_multiplier "
             "accordingly and report the raw numbers as shown in the table. "
