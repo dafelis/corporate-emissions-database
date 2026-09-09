@@ -185,6 +185,58 @@ def _try_parse_candidates(candidates, searched_urls, llama_key, max_attempts=3):
     raise ValueError(f"All candidate URLs failed (last: {last_error})")
 
 
+# ── Source quality ranking ────────────────────────────────────────────────
+
+def _source_quality(title):
+    """Rate financial source quality from document title.  Higher = more authoritative.
+
+    Audited annual reports have precise figures; investor presentations
+    often round numbers or present them in a misleading context.
+
+    Returns:
+        int: 0–100 quality score.
+    """
+    if not title:
+        return 0
+    t = title.lower()
+
+    # Presentations / marketing materials → always low quality
+    if any(kw in t for kw in (
+        "presentation", "capital markets day", "investor day", "roadshow", "webcast",
+    )):
+        return 20
+
+    # Formal audited annual reports → highest quality
+    if any(kw in t for kw in (
+        "annual report and accounts", "annual report & accounts",
+        "annual report", "10-k", "20-f", "statutory accounts",
+    )):
+        return 100
+
+    # Financial statements, formal filings
+    if any(kw in t for kw in ("financial statements", "accounts")):
+        return 80
+
+    # Multi-year summaries, company data pages
+    if any(kw in t for kw in (
+        "five year", "five-year", "5 year", "5-year",
+        "financial summary", "financial highlights",
+        "key financials", "key facts", "fact sheet", "factsheet",
+    )):
+        return 60
+
+    # Results announcements (may be preliminary / unaudited)
+    if any(kw in t for kw in (
+        "results for the year", "preliminary results", "annual results",
+        "full year results", "half year results", "interim results",
+        "results announcement",
+    )):
+        return 40
+
+    # Unknown → moderate default
+    return 50
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Emissions extraction (iterative)
 # ══════════════════════════════════════════════════════════════════════════
@@ -444,6 +496,11 @@ def _extract_financials_from_document(
     session.add(fin_source)
     session.flush()
 
+    # Source quality: higher-quality sources (annual reports) can overwrite
+    # values from lower-quality sources (investor presentations).
+    new_quality = _source_quality(title)
+    log.info(f"    Source quality: '{title}' → q={new_quality}")
+
     saved = 0
     for entry in entries_by_year.values():
         year = entry["reporting_year"]
@@ -458,6 +515,8 @@ def _extract_financials_from_document(
         # Upsert: if a record exists, fill in any null key fields.
         # Revenue comes from income statements, debt/cash from balance sheets —
         # these may arrive in different search rounds.
+        # If the new source is higher quality (e.g. annual report vs investor
+        # presentation), overwrite existing values too.
         existing_record = (
             session.query(FinancialRecord)
             .filter_by(company_id=company.id, reporting_year=year)
@@ -465,16 +524,30 @@ def _extract_financials_from_document(
         )
 
         if existing_record:
+            old_source = (
+                session.query(Source).get(existing_record.source_id)
+                if existing_record.source_id else None
+            )
+            old_quality = _source_quality(old_source.title if old_source else "")
+            upgrade = new_quality > old_quality
+
             updated = False
-            if existing_record.revenue is None and new_revenue is not None:
-                existing_record.revenue = new_revenue
-                updated = True
-            if existing_record.outstanding_debt is None and new_debt is not None:
-                existing_record.outstanding_debt = new_debt
-                updated = True
-            if existing_record.cash_and_equivalents is None and new_cash is not None:
-                existing_record.cash_and_equivalents = new_cash
-                updated = True
+            for attr, new_val in [
+                ("revenue", new_revenue),
+                ("outstanding_debt", new_debt),
+                ("cash_and_equivalents", new_cash),
+            ]:
+                old_val = getattr(existing_record, attr)
+                if old_val is None and new_val is not None:
+                    # Fill missing field (any source)
+                    setattr(existing_record, attr, new_val)
+                    updated = True
+                elif upgrade and new_val is not None and old_val != new_val:
+                    # Overwrite with higher-quality source
+                    setattr(existing_record, attr, new_val)
+                    updated = True
+
+            # Fill other null metadata regardless of source quality
             if existing_record.currency is None and entry.get("currency"):
                 existing_record.currency = entry["currency"]
             if existing_record.fiscal_year_end is None:
@@ -483,9 +556,19 @@ def _extract_financials_from_document(
                 existing_record.period_start = _parse_date(entry.get("period_start"))
             if existing_record.period_end is None:
                 existing_record.period_end = _parse_date(entry.get("period_end"))
+
             if updated:
-                log.info(f"    Updated year {year}: filled in missing financial fields")
+                if upgrade:
+                    existing_record.source_id = fin_source.id
+                    existing_record.confidence_score = best_confidence
+                    old_title = old_source.title if old_source else "unknown"
+                    log.info(f"    Year {year}: UPGRADED source "
+                             f"'{old_title}' (q={old_quality}) → "
+                             f"'{title}' (q={new_quality})")
+                else:
+                    log.info(f"    Updated year {year}: filled in missing financial fields")
                 saved += 1
+
             covered_years.add(year)
             continue
 
