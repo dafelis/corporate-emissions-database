@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 # ── Configuration ─────────────────────────────────────────────────────────
 TARGET_START_YEAR = 2019
 MAX_SEARCHES_PER_TYPE = 5  # max Exa searches per document type per company
+CONFIDENCE_THRESHOLD = 70  # below this, re-extract with a stronger model
+MODEL_FAST = "claude-haiku-4-5-20251001"  # bulk extraction (cheap)
+MODEL_STRONG = "claude-opus-4-6"          # re-extraction for low-confidence results
 
 
 def _current_year():
@@ -221,14 +224,28 @@ def _extract_emissions_round(
             for candidate_tbl in top_tables[:5]:
                 try:
                     extraction = extract_emissions(
-                        tables_md[candidate_tbl["index"]], company_name, client
+                        tables_md[candidate_tbl["index"]], company_name, client,
+                        model=MODEL_FAST,
                     )
                     if extraction.get("emissions"):
+                        confidence = extraction.get("confidence_score", 0) or 0
+
+                        # Re-extract with stronger model if confidence is low
+                        if confidence < CONFIDENCE_THRESHOLD:
+                            log.info(f"    Table {candidate_tbl['index']}: "
+                                     f"low confidence ({confidence}), re-extracting with Opus")
+                            stronger = extract_emissions(
+                                tables_md[candidate_tbl["index"]], company_name, client,
+                                model=MODEL_STRONG,
+                            )
+                            if stronger.get("emissions"):
+                                extraction = stronger
+                                confidence = extraction.get("confidence_score", 0) or 0
+
                         if matched_table_idx is None:
                             matched_table_idx = candidate_tbl["index"]
                             methodology_notes = extraction.get("methodology_notes", "")
 
-                        confidence = extraction.get("confidence_score", 0) or 0
                         if confidence > best_confidence:
                             best_confidence = confidence
 
@@ -250,8 +267,16 @@ def _extract_emissions_round(
     if not all_entries and source_type == "html":
         log.info("    No table results, trying text fallback")
         page_text = extract_html_text(url)
-        extraction = extract_emissions_from_text(page_text, company_name, client)
+        extraction = extract_emissions_from_text(page_text, company_name, client,
+                                                  model=MODEL_FAST)
         if extraction and extraction.get("emissions"):
+            confidence = extraction.get("confidence_score", 0) or 0
+            if confidence < CONFIDENCE_THRESHOLD:
+                log.info(f"    Low confidence ({confidence}), re-extracting with Opus")
+                stronger = extract_emissions_from_text(page_text, company_name, client,
+                                                       model=MODEL_STRONG)
+                if stronger.get("emissions"):
+                    extraction = stronger
             all_entries = extraction["emissions"]
             best_confidence = extraction.get("confidence_score", 0) or 0
             methodology_notes = extraction.get("methodology_notes", "")
@@ -357,13 +382,27 @@ def _extract_financials_from_document(
     for candidate_tbl in top[:5]:
         try:
             fin_extraction = extract_financials(
-                tables_md[candidate_tbl["index"]], company_name, client
+                tables_md[candidate_tbl["index"]], company_name, client,
+                model=MODEL_FAST,
             )
             if fin_extraction.get("financials"):
+                confidence = fin_extraction.get("confidence_score", 0) or 0
+
+                # Re-extract with stronger model if confidence is low
+                if confidence < CONFIDENCE_THRESHOLD:
+                    log.info(f"    Table {candidate_tbl['index']}: "
+                             f"low confidence ({confidence}), re-extracting with Opus")
+                    stronger = extract_financials(
+                        tables_md[candidate_tbl["index"]], company_name, client,
+                        model=MODEL_STRONG,
+                    )
+                    if stronger.get("financials"):
+                        fin_extraction = stronger
+                        confidence = fin_extraction.get("confidence_score", 0) or 0
+
                 if matched_table_idx is None:
                     matched_table_idx = candidate_tbl["index"]
 
-                confidence = fin_extraction.get("confidence_score", 0) or 0
                 if confidence > best_confidence:
                     best_confidence = confidence
 

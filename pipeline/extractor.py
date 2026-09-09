@@ -115,13 +115,15 @@ def extract_emissions(
     table: str,
     company_name: str,
     client: anthropic.Anthropic,
+    model: str = "claude-haiku-4-5-20251001",
 ) -> dict:
-    """Extract Scope 1/2/3 emissions from a table using Claude Opus.
+    """Extract Scope 1/2/3 emissions from a table.
 
     Returns structured emissions data matching EMISSIONS_SCHEMA.
+    Defaults to Haiku for cost efficiency; caller can pass a stronger model.
     """
     response = client.messages.create(
-        model="claude-opus-4-6",
+        model=model,
         max_tokens=8192,
         system=(
             "You are an expert at extracting greenhouse gas emissions data from tables "
@@ -168,10 +170,11 @@ def extract_emissions_from_text(
     text: str,
     company_name: str,
     client: anthropic.Anthropic,
+    model: str = "claude-haiku-4-5-20251001",
 ) -> dict:
     """Extract emissions data from free-form text (fallback when no tables found)."""
     response = client.messages.create(
-        model="claude-opus-4-6",
+        model=model,
         max_tokens=8192,
         system=(
             "You are an expert at extracting greenhouse gas emissions data from documents. "

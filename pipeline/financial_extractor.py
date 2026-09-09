@@ -139,13 +139,15 @@ def extract_financials(
     table: str,
     company_name: str,
     client: anthropic.Anthropic,
+    model: str = "claude-haiku-4-5-20251001",
 ) -> dict:
-    """Extract revenue, debt, and cash from a table using Claude Opus.
+    """Extract revenue, debt, and cash from a table.
 
     Returns structured financial data matching FINANCIAL_SCHEMA.
+    Defaults to Haiku for cost efficiency; caller can pass a stronger model.
     """
     response = client.messages.create(
-        model="claude-opus-4-6",
+        model=model,
         max_tokens=8192,
         system=(
             "You are an expert at extracting financial data from company annual reports. "
