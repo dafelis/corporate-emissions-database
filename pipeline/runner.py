@@ -114,6 +114,42 @@ def _target_years():
     return set(range(TARGET_START_YEAR, _current_year() + 1))
 
 
+def _get_financial_needs(session, company_id, target_years):
+    """Return years that still need financial data: no record, or key fields null.
+
+    Revenue comes from the income statement and debt/cash from the balance sheet —
+    these may be in different documents, so a record can exist with only some fields.
+    This function ensures the pipeline keeps searching until all three are filled.
+    """
+    from sqlalchemy import or_
+
+    covered_rows = (
+        session.query(FinancialRecord.reporting_year)
+        .filter_by(company_id=company_id)
+        .all()
+    )
+    covered = {r[0] for r in covered_rows}
+    no_record = target_years - covered
+
+    # Years where the record exists but key fields are still null
+    incomplete_rows = (
+        session.query(FinancialRecord.reporting_year)
+        .filter(
+            FinancialRecord.company_id == company_id,
+            FinancialRecord.reporting_year.in_(list(target_years)),
+            or_(
+                FinancialRecord.revenue.is_(None),
+                FinancialRecord.outstanding_debt.is_(None),
+                FinancialRecord.cash_and_equivalents.is_(None),
+            ),
+        )
+        .all()
+    )
+    incomplete = {r[0] for r in incomplete_rows}
+
+    return no_record | incomplete
+
+
 def _try_parse_candidates(candidates, searched_urls, llama_key, max_attempts=3):
     """Try to parse documents from a ranked candidate list, skipping 403s.
 
@@ -237,7 +273,33 @@ def _extract_emissions_round(
 
         for entry in all_entries:
             year = entry["reporting_year"]
-            if year < TARGET_START_YEAR or year in covered_years:
+            if year < TARGET_START_YEAR:
+                continue
+
+            # Upsert: if a record exists, fill in any null scope fields
+            existing_record = (
+                session.query(EmissionsRecord)
+                .filter_by(company_id=company.id, reporting_year=year)
+                .first()
+            ) if year in covered_years else None
+
+            if existing_record:
+                updated = False
+                for field in ("scope_1", "scope_2_location", "scope_2_market", "scope_3"):
+                    if getattr(existing_record, field) is None and entry.get(field) is not None:
+                        setattr(existing_record, field, entry[field])
+                        updated = True
+                if existing_record.scope_3_categories is None and entry.get("scope_3_categories"):
+                    existing_record.scope_3_categories = entry["scope_3_categories"]
+                if existing_record.boundary is None and entry.get("boundary"):
+                    existing_record.boundary = entry["boundary"]
+                if existing_record.period_start is None:
+                    existing_record.period_start = _parse_date(entry.get("period_start"))
+                if existing_record.period_end is None:
+                    existing_record.period_end = _parse_date(entry.get("period_end"))
+                if updated:
+                    log.info(f"    Updated year {year}: filled in missing emissions fields")
+                    saved += 1
                 continue
 
             record = EmissionsRecord(
@@ -346,10 +408,47 @@ def _extract_financials_from_document(
     saved = 0
     for entry in entries_by_year.values():
         year = entry["reporting_year"]
-        if year < TARGET_START_YEAR or year in covered_years:
+        if year < TARGET_START_YEAR:
             continue
 
         multiplier = entry.get("unit_multiplier", 1) or 1
+        new_revenue = normalise_to_units(entry.get("revenue"), multiplier)
+        new_debt = normalise_to_units(entry.get("outstanding_debt"), multiplier)
+        new_cash = normalise_to_units(entry.get("cash_and_equivalents"), multiplier)
+
+        # Upsert: if a record exists, fill in any null key fields.
+        # Revenue comes from income statements, debt/cash from balance sheets —
+        # these may arrive in different search rounds.
+        existing_record = (
+            session.query(FinancialRecord)
+            .filter_by(company_id=company.id, reporting_year=year)
+            .first()
+        )
+
+        if existing_record:
+            updated = False
+            if existing_record.revenue is None and new_revenue is not None:
+                existing_record.revenue = new_revenue
+                updated = True
+            if existing_record.outstanding_debt is None and new_debt is not None:
+                existing_record.outstanding_debt = new_debt
+                updated = True
+            if existing_record.cash_and_equivalents is None and new_cash is not None:
+                existing_record.cash_and_equivalents = new_cash
+                updated = True
+            if existing_record.currency is None and entry.get("currency"):
+                existing_record.currency = entry["currency"]
+            if existing_record.fiscal_year_end is None:
+                existing_record.fiscal_year_end = _parse_date(entry.get("fiscal_year_end"))
+            if existing_record.period_start is None:
+                existing_record.period_start = _parse_date(entry.get("period_start"))
+            if existing_record.period_end is None:
+                existing_record.period_end = _parse_date(entry.get("period_end"))
+            if updated:
+                log.info(f"    Updated year {year}: filled in missing financial fields")
+                saved += 1
+            covered_years.add(year)
+            continue
 
         fin_record = FinancialRecord(
             company_id=company.id,
@@ -357,9 +456,9 @@ def _extract_financials_from_document(
             fiscal_year_end=_parse_date(entry.get("fiscal_year_end")),
             period_start=_parse_date(entry.get("period_start")),
             period_end=_parse_date(entry.get("period_end")),
-            revenue=normalise_to_units(entry.get("revenue"), multiplier),
-            outstanding_debt=normalise_to_units(entry.get("outstanding_debt"), multiplier),
-            cash_and_equivalents=normalise_to_units(entry.get("cash_and_equivalents"), multiplier),
+            revenue=new_revenue,
+            outstanding_debt=new_debt,
+            cash_and_equivalents=new_cash,
             currency=entry.get("currency"),
             source_id=fin_source.id,
             confidence_score=best_confidence,
@@ -481,13 +580,13 @@ def process_company(
     # ── PART 2: Financials (iterative) ────────────────────────────────────
 
     fin_covered = _get_covered_years(session, company.id, FinancialRecord)
-    fin_missing = target - fin_covered
+    fin_missing = _get_financial_needs(session, company.id, target)
     fin_searched_urls = set()
     total_fin_saved = 0
 
     if fin_missing:
         log.info(f"  Financials: have {sorted(fin_covered) or 'none'}, "
-                 f"missing {sorted(fin_missing)}")
+                 f"need data for {sorted(fin_missing)}")
 
         # Search 1: try a five-year financial summary first (covers most years in one hit)
         log.info(f"  Financial search 1/{MAX_SEARCHES_PER_TYPE + 1} (five-year summary)")
@@ -505,7 +604,7 @@ def process_company(
                 company, company_name, client, session, fin_covered,
             )
             total_fin_saved += saved
-            fin_missing = target - fin_covered
+            fin_missing = _get_financial_needs(session, company.id, target)
         except Exception as e:
             log.warning(f"    Five-year summary search failed: {e}")
             session.rollback()
@@ -530,7 +629,7 @@ def process_company(
                     session, fin_covered, fin_searched_urls, target_year=target_year,
                 )
                 total_fin_saved += saved
-                fin_missing = target - fin_covered
+                fin_missing = _get_financial_needs(session, company.id, target)
                 if saved == 0:
                     consecutive_empty += 1
                     if consecutive_empty >= 2:
@@ -548,11 +647,12 @@ def process_company(
             search_count += 1
 
         if total_fin_saved:
-            log.info(f"  Financials: saved {total_fin_saved} records "
+            fin_covered = _get_covered_years(session, company.id, FinancialRecord)
+            log.info(f"  Financials: saved/updated {total_fin_saved} records "
                      f"(covering {sorted(fin_covered & target)})")
-        still_missing = target - fin_covered
+        still_missing = _get_financial_needs(session, company.id, target)
         if still_missing:
-            log.info(f"  Financials: no data found for years {sorted(still_missing)}")
+            log.info(f"  Financials: still incomplete for years {sorted(still_missing)}")
 
     # ── PART 3: Market data from yfinance ─────────────────────────────────
 
