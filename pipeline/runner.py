@@ -610,16 +610,24 @@ def process_company(
             session.rollback()
 
         # Searches 2+: targeted annual reports for remaining gaps.
-        # Alternate oldest / newest missing year to attack gaps from both ends.
+        # Prioritize years with NO record over years with just incomplete fields,
+        # then alternate oldest / newest to attack gaps from both ends.
         search_count = 0
         consecutive_empty = 0
         while fin_missing and search_count < MAX_SEARCHES_PER_TYPE:
+            # Prefer years with no record at all — incomplete years can be
+            # filled as a side effect when documents happen to cover them.
+            no_record = target - _get_covered_years(session, company.id, FinancialRecord)
+            pick_from = no_record if no_record else fin_missing
+
             if search_count % 2 == 0:
-                target_year = min(fin_missing)
-                year_label = f"oldest missing: {target_year}"
+                target_year = min(pick_from)
+                label = "no data" if no_record else "incomplete"
+                year_label = f"{label}: {target_year}"
             else:
-                target_year = max(fin_missing)
-                year_label = f"newest missing: {target_year}"
+                target_year = max(pick_from)
+                label = "no data" if no_record else "incomplete"
+                year_label = f"{label}: {target_year}"
 
             log.info(f"  Financial search {search_count + 2}/{MAX_SEARCHES_PER_TYPE + 1} "
                      f"({year_label})")
