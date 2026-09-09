@@ -44,7 +44,7 @@ session = get_session(DATABASE_URL)
 
 st.sidebar.title("Corporate Emissions DB")
 
-view = st.sidebar.radio("View", ["Data Table", "Review"], index=0)
+view = st.sidebar.radio("View", ["Data Table", "Single Company", "Review"], index=0)
 
 st.sidebar.markdown("---")
 st.sidebar.header("Stats")
@@ -704,10 +704,115 @@ def render_review():
 
 
 # ════════════════════════════════════════════════════════════════════════
+# SINGLE COMPANY VIEW
+# ════════════════════════════════════════════════════════════════════════
+
+def render_single_company():
+    st.title("Single Company Table")
+
+    companies = session.query(Company).order_by(Company.name).all()
+    if not companies:
+        st.info("No companies in the database yet.")
+        return
+
+    options = {f"{c.id} — {c.name}": c.id for c in companies}
+    selected = st.selectbox("Select company", list(options.keys()))
+    company_id = options[selected]
+    company = session.query(Company).get(company_id)
+
+    # Load data for this company
+    emissions = (
+        session.query(EmissionsRecord)
+        .filter_by(company_id=company_id)
+        .order_by(EmissionsRecord.reporting_year)
+        .all()
+    )
+    financials = (
+        session.query(FinancialRecord)
+        .filter_by(company_id=company_id)
+        .order_by(FinancialRecord.reporting_year)
+        .all()
+    )
+
+    em_by_year = {e.reporting_year: e for e in emissions}
+    fin_by_year = {f.reporting_year: f for f in financials}
+
+    all_years = sorted(set(em_by_year.keys()) | set(fin_by_year.keys()))
+
+    if not all_years:
+        st.info(f"No data for {company.name} yet.")
+        return
+
+    # ── Basis helper ─────────────────────────────────────────────────
+    def record_basis(rec):
+        if not rec or not rec.period_end:
+            return "—"
+        m, d, y = rec.period_end.month, rec.period_end.day, rec.period_end.year
+        if m == 12 and d == 31:
+            return f"CY {y}"
+        if m == 3 and d == 31:
+            return f"FY {y}"
+        return "Other"
+
+    # ── Format helper ────────────────────────────────────────────────
+    def fmt(value):
+        if value is None:
+            return "—"
+        if abs(value) >= 1_000_000_000:
+            return f"{value / 1_000_000_000:,.2f}bn"
+        if abs(value) >= 1_000_000:
+            return f"{value / 1_000_000:,.1f}m"
+        if abs(value) >= 1_000:
+            return f"{value / 1_000:,.1f}k"
+        if value != int(value):
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        return f"{int(value):,}"
+
+    # ── Build rows ───────────────────────────────────────────────────
+    rows = []
+    for year in all_years:
+        em = em_by_year.get(year)
+        fin = fin_by_year.get(year)
+        rows.append({
+            "Year": year,
+            "S1": fmt(em.scope_1) if em else "—",
+            "S2 loc": fmt(em.scope_2_location) if em else "—",
+            "S2 mkt": fmt(em.scope_2_market) if em else "—",
+            "S3": fmt(em.scope_3) if em else "—",
+            "Revenue": fmt(fin.revenue) if fin else "—",
+            "Debt": fmt(fin.outstanding_debt) if fin else "—",
+            "Cash": fmt(fin.cash_and_equivalents) if fin else "—",
+            "Equity": fmt(fin.equity_value) if fin else "—",
+            "EV": fmt(fin.enterprise_value) if fin else "—",
+            "Em. Basis": record_basis(em),
+            "Fin. Basis": record_basis(fin),
+        })
+
+    df = pd.DataFrame(rows)
+    st.subheader(company.name)
+
+    # Show source info
+    if company.ticker:
+        st.caption(f"Ticker: {company.ticker}")
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # CSV download
+    csv = df.to_csv(index=False)
+    safe_name = company.name.lower().replace(" ", "_").replace("&", "and")
+    st.download_button(
+        "Download CSV", csv,
+        f"{safe_name}_data.csv", "text/csv",
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════
 # Route to selected view
 # ════════════════════════════════════════════════════════════════════════
 
 if view == "Data Table":
     render_data_table()
+elif view == "Single Company":
+    render_single_company()
 else:
     render_review()
