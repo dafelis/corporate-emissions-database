@@ -3,22 +3,25 @@ Streamlit interface for the corporate emissions database.
 
 Views:
   - Data Table: all companies × years pivot with colour-coded approval status
+  - Single Company: per-company year-by-year table with source popups
   - Review: single-record review with approve/reject/flag/edit actions
 
 Run with: streamlit run review/app.py
 """
 
+import base64
+import json
 import os
 import sys
 
 # Ensure the project root is on the Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import json
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from sqlalchemy import func
 
@@ -77,6 +80,169 @@ def log_review(record_obj, record_type, old_status, new_status, notes="", field_
     )
     session.add(history)
     session.commit()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Source-popup helpers (shared by Data Table + Single Company views)
+# ════════════════════════════════════════════════════════════════════════
+
+def _collect_source_ids(records):
+    """Return the set of non-null source_id values from a list of ORM records."""
+    return {r.source_id for r in records if r.source_id}
+
+
+def _build_source_data(session_obj, source_ids, include_screenshots=False):
+    """Build a dict keyed by str(source_id) for embedding in JavaScript."""
+    if not source_ids:
+        return {}
+    sources = session_obj.query(Source).filter(Source.id.in_(source_ids)).all()
+    result = {}
+    for s in sources:
+        entry = {
+            "title": s.title or "Untitled",
+            "url": s.url or "",
+            "type": s.document_type or "Unknown",
+            "page": (s.page_number + 1) if s.page_number is not None else None,
+        }
+        if include_screenshots and s.screenshot_path and os.path.exists(s.screenshot_path):
+            try:
+                with open(s.screenshot_path, "rb") as img_f:
+                    b64 = base64.b64encode(img_f.read()).decode()
+                entry["screenshot"] = "data:image/png;base64," + b64
+            except Exception:
+                pass
+        result[str(s.id)] = entry
+    return result
+
+
+# ── CSS for the source-popup modal ────────────────────────────────────
+
+_POPUP_STYLES = """
+/* Modal backdrop + dialog */
+.modal-backdrop {
+    display:none; position:fixed;
+    top:0; left:0; right:0; bottom:0;
+    background:rgba(0,0,0,0.45); z-index:999;
+}
+.source-modal {
+    display:none; position:fixed;
+    top:50%; left:50%; transform:translate(-50%,-50%);
+    background:#fff; border-radius:12px;
+    box-shadow:0 8px 32px rgba(0,0,0,0.25);
+    z-index:1000; max-width:520px; width:90%;
+    max-height:80vh; overflow:hidden;
+    animation:modalIn .2s ease;
+}
+@keyframes modalIn {
+    from { opacity:0; transform:translate(-50%,-45%); }
+    to   { opacity:1; transform:translate(-50%,-50%); }
+}
+.modal-hdr {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:16px 20px 12px; border-bottom:1px solid #eee;
+}
+.modal-hdr h3 { margin:0; font-size:15px; color:#333; }
+.modal-x {
+    background:none; border:none; font-size:22px; cursor:pointer;
+    color:#999; padding:2px 6px; line-height:1; border-radius:4px;
+}
+.modal-x:hover { background:#f0f0f0; color:#333; }
+.modal-body {
+    padding:16px 20px 20px; overflow-y:auto; max-height:calc(80vh - 60px);
+}
+.modal-body .src-title { font-weight:600; font-size:14px; margin-bottom:8px; }
+.modal-body .src-meta  { font-size:13px; color:#666; margin-bottom:4px; }
+.modal-body .src-link  { margin-top:10px; }
+.modal-body .src-link a { color:#1a73e8; text-decoration:none; font-size:13px; }
+.modal-body .src-link a:hover { text-decoration:underline; }
+.modal-body .src-screenshot {
+    margin-top:12px; border:1px solid #eee;
+    border-radius:6px; overflow:hidden;
+}
+.modal-body .src-screenshot img { width:100%; display:block; }
+@media (prefers-color-scheme: dark) {
+    .source-modal { background:#1e1e2e; }
+    .modal-hdr   { border-color:#333; }
+    .modal-hdr h3 { color:#e0e0e0; }
+    .modal-x     { color:#888; }
+    .modal-x:hover { background:#2a2a3a; color:#ddd; }
+    .modal-body .src-title { color:#e0e0e0; }
+    .modal-body .src-meta  { color:#999; }
+    .modal-body .src-link a { color:#6db3f2; }
+    .modal-body .src-screenshot { border-color:#333; }
+}
+/* Clickable-number styling */
+.has-source {
+    cursor:pointer;
+    color:#1a73e8 !important;
+    text-decoration:underline;
+    text-decoration-color:rgba(26,115,232,0.3);
+    text-underline-offset:2px;
+}
+.has-source:hover {
+    text-decoration-color:rgba(26,115,232,0.8);
+    background:rgba(26,115,232,0.06);
+}
+@media (prefers-color-scheme: dark) {
+    .has-source { color:#6db3f2 !important; text-decoration-color:rgba(109,179,242,0.3); }
+    .has-source:hover { text-decoration-color:rgba(109,179,242,0.8); background:rgba(109,179,242,0.06); }
+}
+"""
+
+# ── JavaScript for source popup (.replace("__SOURCES__", json)) ───────
+
+_POPUP_JS = r"""
+var SOURCES=__SOURCES__;
+function showSource(sid){
+    var s=SOURCES[String(sid)]; if(!s) return;
+    var h='<div class="src-title">📄 '+esc(s.title)+'</div>';
+    h+='<div class="src-meta">Type: '+esc(s.type);
+    if(s.page) h+=' &nbsp;|&nbsp; Page: '+s.page;
+    h+='</div>';
+    if(s.url) h+='<div class="src-link"><a href="'+esc(s.url)+'" target="_blank" rel="noopener">Open source document ↗</a></div>';
+    if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'"></div>';
+    document.getElementById('modal-title').textContent='Source';
+    document.getElementById('modal-body').innerHTML=h;
+    document.getElementById('modal-backdrop').style.display='block';
+    document.getElementById('source-modal').style.display='block';
+}
+function showYfinance(){
+    var h='<div class="src-title">📊 Yahoo Finance</div>';
+    h+='<div class="src-meta">Market data retrieved via yfinance Python library</div>';
+    h+='<div class="src-meta" style="margin-top:8px">Equity value = market capitalisation at fiscal year-end</div>';
+    h+='<div class="src-meta">Enterprise value = equity + debt − cash</div>';
+    document.getElementById('modal-title').textContent='Market Data Source';
+    document.getElementById('modal-body').innerHTML=h;
+    document.getElementById('modal-backdrop').style.display='block';
+    document.getElementById('source-modal').style.display='block';
+}
+function closeModal(){
+    document.getElementById('modal-backdrop').style.display='none';
+    document.getElementById('source-modal').style.display='none';
+}
+function esc(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal();});
+"""
+
+# ── Modal HTML container ──────────────────────────────────────────────
+
+_POPUP_MODAL_HTML = """
+<div id="modal-backdrop" class="modal-backdrop" onclick="closeModal()"></div>
+<div id="source-modal" class="source-modal">
+    <div class="modal-hdr">
+        <h3 id="modal-title">Source</h3>
+        <button class="modal-x" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+</div>
+"""
+
+
+def _source_popup_block(source_data):
+    """Return modal container + <script> with embedded source data."""
+    safe_json = json.dumps(source_data).replace("</", "<\\/")
+    js = _POPUP_JS.replace("__SOURCES__", safe_json)
+    return _POPUP_MODAL_HTML + "\n<script>" + js + "</script>"
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -169,10 +335,26 @@ def render_data_table():
             return f"{value:,.2f}".rstrip("0").rstrip(".")
         return f"{int(value):,}"
 
+    # ── Build source data for popups ──────────────────────────────────
+    source_ids = _collect_source_ids(emissions) | _collect_source_ids(financials)
+    source_data = _build_source_data(session, source_ids, include_screenshots=False)
+
     # ── Build HTML table ───────────────────────────────────────────────
     html_parts = []
+
+    # Count basis columns: 1 per visible category
+    n_basis = (1 if show_emissions else 0) + (1 if show_financials else 0)
+
+    # Styles: body (for iframe), table, popup
+    html_parts.append("<style>")
     html_parts.append("""
-    <style>
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        margin: 0; padding: 4px; background: #ffffff; color: #333;
+    }
+    @media (prefers-color-scheme: dark) {
+        body { background: #0e1117; color: #e0e0e0; }
+    }
     .data-table-wrap { overflow-x: auto; }
     .data-table {
         border-collapse: collapse;
@@ -215,13 +397,11 @@ def render_data_table():
         .data-table .not-approved { color: #666; }
         .data-table .no-data { color: #333; }
     }
-    </style>
-    <div class="data-table-wrap">
-    <table class="data-table">
     """)
+    html_parts.append(_POPUP_STYLES)
+    html_parts.append("</style>")
 
-    # Count basis columns: 1 per visible category
-    n_basis = (1 if show_emissions else 0) + (1 if show_financials else 0)
+    html_parts.append('<div class="data-table-wrap"><table class="data-table">')
 
     # Header row 1: year spans
     html_parts.append("<thead><tr><th rowspan='2'>Company</th>")
@@ -242,6 +422,7 @@ def render_data_table():
 
     # Data rows
     html_parts.append("<tbody>")
+    n_visible = 0
     for company in companies:
         # Skip companies with no data at all
         has_any = any(
@@ -250,6 +431,7 @@ def render_data_table():
         )
         if not has_any:
             continue
+        n_visible += 1
 
         html_parts.append(f"<tr><td class='company-name'>{company.name}</td>")
 
@@ -261,13 +443,27 @@ def render_data_table():
                 if source_type == "emissions":
                     value = getattr(em, field_name, None) if em else None
                     status = em.review_status if em else None
+                    src_id = em.source_id if em else None
                 else:
                     value = getattr(fin, field_name, None) if fin else None
                     status = fin.review_status if fin else None
+                    src_id = fin.source_id if fin else None
 
                 if value is not None:
                     css_class = "approved" if status == "approved" else "not-approved"
-                    html_parts.append(f"<td class='{css_class}'>{fmt_num(value)}</td>")
+                    # Make clickable if source is available
+                    if field_name in ("equity_value", "enterprise_value"):
+                        html_parts.append(
+                            f"<td class='{css_class} has-source' "
+                            f"onclick='showYfinance()'>{fmt_num(value)}</td>"
+                        )
+                    elif src_id:
+                        html_parts.append(
+                            f"<td class='{css_class} has-source' "
+                            f"onclick='showSource({src_id})'>{fmt_num(value)}</td>"
+                        )
+                    else:
+                        html_parts.append(f"<td class='{css_class}'>{fmt_num(value)}</td>")
                 else:
                     html_parts.append("<td class='no-data'>—</td>")
 
@@ -275,17 +471,26 @@ def render_data_table():
             if show_emissions:
                 em_basis = record_basis(em)
                 em_basis_class = "not-approved" if em_basis == "—" else "approved"
-                html_parts.append(f"<td class='{em_basis_class}' style='text-align:center'>{em_basis}</td>")
+                html_parts.append(
+                    f"<td class='{em_basis_class}' style='text-align:center'>{em_basis}</td>"
+                )
             if show_financials:
                 fin_basis = record_basis(fin)
                 fin_basis_class = "not-approved" if fin_basis == "—" else "approved"
-                html_parts.append(f"<td class='{fin_basis_class}' style='text-align:center'>{fin_basis}</td>")
+                html_parts.append(
+                    f"<td class='{fin_basis_class}' style='text-align:center'>{fin_basis}</td>"
+                )
 
         html_parts.append("</tr>")
 
     html_parts.append("</tbody></table></div>")
 
-    st.markdown("".join(html_parts), unsafe_allow_html=True)
+    # Append modal + JS
+    html_parts.append(_source_popup_block(source_data))
+
+    # Render via components.html (iframe with JS support)
+    table_height = max(500, 100 + n_visible * 35)
+    components.html("".join(html_parts), height=table_height, scrolling=True)
 
     # ── Export as CSV ──────────────────────────────────────────────────
     st.markdown("---")
@@ -743,7 +948,15 @@ def render_single_company():
         st.info(f"No data for {company.name} yet.")
         return
 
-    # ── Basis helper ─────────────────────────────────────────────────
+    st.subheader(company.name)
+    if company.ticker:
+        st.caption(f"Ticker: {company.ticker}")
+
+    # ── Build source data (with screenshots for single-company view) ──
+    source_ids = _collect_source_ids(emissions) | _collect_source_ids(financials)
+    source_data = _build_source_data(session, source_ids, include_screenshots=True)
+
+    # ── Helpers ────────────────────────────────────────────────────────
     def record_basis(rec):
         if not rec or not rec.period_end:
             return "—"
@@ -754,7 +967,6 @@ def render_single_company():
             return f"FY {y}"
         return "Other"
 
-    # ── Format helper ────────────────────────────────────────────────
     def fmt(value):
         if value is None:
             return "—"
@@ -768,12 +980,138 @@ def render_single_company():
             return f"{value:,.2f}".rstrip("0").rstrip(".")
         return f"{int(value):,}"
 
-    # ── Build rows ───────────────────────────────────────────────────
-    rows = []
+    # ── Field definitions ─────────────────────────────────────────────
+    fields = [
+        ("S1", "scope_1", "emissions"),
+        ("S2 loc", "scope_2_location", "emissions"),
+        ("S2 mkt", "scope_2_market", "emissions"),
+        ("S3", "scope_3", "emissions"),
+        ("Revenue", "revenue", "financial"),
+        ("Debt", "outstanding_debt", "financial"),
+        ("Cash", "cash_and_equivalents", "financial"),
+        ("Equity", "equity_value", "financial"),
+        ("EV", "enterprise_value", "financial"),
+        ("Em. Basis", "_em_basis", "basis"),
+        ("Fin. Basis", "_fin_basis", "basis"),
+    ]
+
+    # ── Build HTML table ──────────────────────────────────────────────
+    html = []
+
+    # Styles
+    html.append("<style>")
+    html.append("""
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        margin: 0; padding: 4px; background: #ffffff; color: #333;
+    }
+    @media (prefers-color-scheme: dark) {
+        body { background: #0e1117; color: #e0e0e0; }
+    }
+    .sc-table {
+        border-collapse: collapse;
+        font-size: 13px;
+        width: 100%;
+    }
+    .sc-table th {
+        background: #f0f2f6;
+        border: 1px solid #ddd;
+        padding: 6px 10px;
+        text-align: center;
+        font-weight: 600;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+    }
+    .sc-table td {
+        border: 1px solid #eee;
+        padding: 5px 10px;
+        text-align: right;
+    }
+    .sc-table td:first-child {
+        text-align: center;
+        font-weight: 600;
+    }
+    .sc-table tr:hover { background: #f8f9fb; }
+    .no-data { color: #ccc; }
+    @media (prefers-color-scheme: dark) {
+        .sc-table th { background: #262730; border-color: #444; color: #fafafa; }
+        .sc-table td { border-color: #333; color: #e0e0e0; }
+        .sc-table td:first-child { color: #fafafa; }
+        .sc-table tr:hover { background: #1a1c24; }
+        .no-data { color: #444; }
+    }
+    """)
+    html.append(_POPUP_STYLES)
+    html.append("</style>")
+
+    # Table header
+    html.append('<table class="sc-table"><thead><tr><th>Year</th>')
+    for label, _, _ in fields:
+        html.append(f"<th>{label}</th>")
+    html.append("</tr></thead><tbody>")
+
+    # Table rows
     for year in all_years:
         em = em_by_year.get(year)
         fin = fin_by_year.get(year)
-        rows.append({
+        html.append(f"<tr><td>{year}</td>")
+
+        for label, field_name, source_type in fields:
+            if source_type == "basis":
+                rec = em if field_name == "_em_basis" else fin
+                basis = record_basis(rec)
+                cls = "no-data" if basis == "—" else ""
+                html.append(f"<td class='{cls}' style='text-align:center'>{basis}</td>")
+            elif source_type == "emissions":
+                value = getattr(em, field_name, None) if em else None
+                src_id = em.source_id if em else None
+                if value is not None:
+                    if src_id:
+                        html.append(
+                            f"<td class='has-source' onclick='showSource({src_id})'>"
+                            f"{fmt(value)}</td>"
+                        )
+                    else:
+                        html.append(f"<td>{fmt(value)}</td>")
+                else:
+                    html.append("<td class='no-data'>—</td>")
+            else:  # financial
+                value = getattr(fin, field_name, None) if fin else None
+                src_id = fin.source_id if fin else None
+                if value is not None:
+                    if field_name in ("equity_value", "enterprise_value"):
+                        html.append(
+                            f"<td class='has-source' onclick='showYfinance()'>"
+                            f"{fmt(value)}</td>"
+                        )
+                    elif src_id:
+                        html.append(
+                            f"<td class='has-source' onclick='showSource({src_id})'>"
+                            f"{fmt(value)}</td>"
+                        )
+                    else:
+                        html.append(f"<td>{fmt(value)}</td>")
+                else:
+                    html.append("<td class='no-data'>—</td>")
+
+        html.append("</tr>")
+
+    html.append("</tbody></table>")
+
+    # Append modal + JS
+    html.append(_source_popup_block(source_data))
+
+    # Render
+    table_height = max(500, 70 + len(all_years) * 34)
+    components.html("".join(html), height=table_height, scrolling=True)
+
+    # ── CSV download (outside iframe) ─────────────────────────────────
+    csv_rows = []
+    for year in all_years:
+        em = em_by_year.get(year)
+        fin = fin_by_year.get(year)
+        csv_rows.append({
             "Year": year,
             "S1": fmt(em.scope_1) if em else "—",
             "S2 loc": fmt(em.scope_2_location) if em else "—",
@@ -787,23 +1125,10 @@ def render_single_company():
             "Em. Basis": record_basis(em),
             "Fin. Basis": record_basis(fin),
         })
-
-    df = pd.DataFrame(rows)
-    st.subheader(company.name)
-
-    # Show source info
-    if company.ticker:
-        st.caption(f"Ticker: {company.ticker}")
-
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-    # CSV download
+    df = pd.DataFrame(csv_rows)
     csv = df.to_csv(index=False)
     safe_name = company.name.lower().replace(" ", "_").replace("&", "and")
-    st.download_button(
-        "Download CSV", csv,
-        f"{safe_name}_data.csv", "text/csv",
-    )
+    st.download_button("Download CSV", csv, f"{safe_name}_data.csv", "text/csv")
 
 
 # ════════════════════════════════════════════════════════════════════════
