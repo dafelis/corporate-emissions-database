@@ -32,6 +32,7 @@ from pipeline.parser import (
     extract_html_text,
     detect_source_type,
 )
+from pipeline.fallback_parser import parse_with_fallbacks, ParseProgress
 from pipeline.extractor import EMISSIONS_SCHEMA
 from data.ftse100 import FTSE_100
 
@@ -413,6 +414,23 @@ top_title = ranked[selected_doc_idx]["title"]
 
 st.header("3️⃣ Parse Document")
 
+# Streamlit-aware progress callbacks
+class _StProgress(ParseProgress):
+    def __init__(self):
+        self._container = st.container()
+
+    def on_trying(self, method, url):
+        self._container.write(f"🔄 Trying **{method}**…")
+
+    def on_success(self, method, elapsed, table_count):
+        self._container.success(
+            f"✅ **{method}** succeeded — {table_count} table(s) in {elapsed:.1f}s"
+        )
+
+    def on_fail(self, method, error, elapsed):
+        self._container.warning(f"⚠️ **{method}** failed ({elapsed:.1f}s): {error}")
+
+
 # Build candidate list: selected doc first, then remaining ranked docs in order
 parse_candidates = [ranked[selected_doc_idx]] + [
     r for i, r in enumerate(ranked) if i != selected_doc_idx
@@ -423,6 +441,7 @@ tables_md = []
 parse_time = 0.0
 parsed_url = None
 parsed_title = None
+parse_method = None
 
 for cand_idx, candidate in enumerate(parse_candidates):
     cand_url = candidate["url"]
@@ -432,37 +451,40 @@ for cand_idx, candidate in enumerate(parse_candidates):
     if cand_idx == 0:
         st.write(f"Parsing: **{cand_title}**")
     else:
-        st.info(f"⏩ Auto-fallback → trying candidate {cand_idx + 1}: **{cand_title}**")
+        st.info(f"⏩ Candidate {cand_idx + 1}: **{cand_title}**")
     st.caption(f"{source_type.upper()} — {cand_url}")
 
-    with st.spinner(f"Parsing {'(fallback) ' if cand_idx > 0 else ''}document…"):
-        t0 = time.time()
-        try:
-            if source_type == "pdf":
-                documents = parse_pdf(cand_url, LLAMA_KEY)
-                table_dicts = extract_tables_from_documents(documents)
-            elif source_type == "excel":
-                table_dicts = parse_excel(cand_url)
-            else:
-                table_dicts = parse_html(cand_url)
-            tables_md = [t["markdown"] for t in table_dicts]
-            parse_time = time.time() - t0
-            parsed_url = cand_url
-            parsed_title = cand_title
-            break  # success — stop trying
-        except Exception as e:
-            elapsed = time.time() - t0
-            st.warning(f"⚠️ Failed in {elapsed:.1f}s: {e}")
-            if cand_idx == len(parse_candidates) - 1:
-                st.error("All candidates failed to parse.")
-                st.stop()
-            continue
+    progress = _StProgress()
+    try:
+        table_dicts, method, elapsed = parse_with_fallbacks(
+            url=cand_url,
+            llama_key=LLAMA_KEY,
+            exa_key=EXA_KEY,
+            source_type=source_type,
+            progress=progress,
+        )
+        tables_md = [t["markdown"] for t in table_dicts]
+        parse_time = elapsed
+        parsed_url = cand_url
+        parsed_title = cand_title
+        parse_method = method
+        break  # success — stop trying candidates
+    except RuntimeError as e:
+        # All strategies failed for this candidate
+        st.warning(f"All strategies failed for this candidate")
+        if cand_idx == len(parse_candidates) - 1:
+            st.error("❌ All candidates and all strategies exhausted.")
+            st.stop()
+        continue
 
 # Update top_url/top_title for downstream steps
 top_url = parsed_url
 top_title = parsed_title
 
-st.success(f"Found **{len(tables_md)}** tables in {parse_time:.1f}s")
+st.success(
+    f"Found **{len(tables_md)}** tables in {parse_time:.1f}s "
+    f"(via **{parse_method}**)"
+)
 
 if tables_md:
     for i, md in enumerate(tables_md):
@@ -470,20 +492,8 @@ if tables_md:
         with st.expander(f"Table {i}  ·  page {page}  ·  {len(md):,} chars"):
             st.code(md[:2000] + ("\n…" if len(md) > 2000 else ""), language="markdown")
 else:
-    st.warning("No tables found. The document may not have structured tables.")
-
-    # Offer text fallback for HTML pages
-    if source_type == "html":
-        st.info("Trying text-based extraction as fallback…")
-        page_text = extract_html_text(top_url)
-        if page_text:
-            tables_md = [page_text]
-            table_dicts = [{"markdown": page_text}]
-            st.success(f"Got {len(page_text):,} chars of page text")
-        else:
-            st.stop()
-    else:
-        st.stop()
+    st.warning("No tables found in parsed document.")
+    st.stop()
 
 
 # ── STEP 4: Rank tables ──────────────────────────────────────────────

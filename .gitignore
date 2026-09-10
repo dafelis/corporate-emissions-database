@@ -5,3 +5,5 @@ __pycache__/
 venv/
 *.egg-info/
 .claude/
+data/document_cache/
+screenshots/

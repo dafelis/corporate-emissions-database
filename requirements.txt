@@ -23,5 +23,8 @@ streamlit
 # Market data
 yfinance
 
+# Browser automation (fallback for blocked sites)
+playwright
+
 # Utilities
 python-dotenv

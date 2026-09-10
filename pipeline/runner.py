@@ -23,6 +23,7 @@ from pipeline.parser import (
     extract_html_text, detect_source_type, download_to_tempfile,
     render_pdf_page,
 )
+from pipeline.fallback_parser import parse_with_fallbacks
 from pipeline.extractor import find_emissions_tables, extract_emissions, extract_emissions_from_text
 from pipeline.financial_extractor import find_financial_tables, extract_financials, normalise_to_units
 from pipeline.market_data import get_equity_value_at_date, get_industry_info
@@ -48,15 +49,20 @@ def _current_year():
 
 
 def _parse_document(url, source_type, llama_key):
-    """Parse a document and return table dicts + markdown list."""
-    table_dicts = []
-    if source_type == "pdf":
-        documents = parse_pdf(url, llama_key)
-        table_dicts = extract_tables_from_documents(documents)
-    elif source_type == "excel":
-        table_dicts = parse_excel(url)
-    else:
-        table_dicts = parse_html(url)
+    """Parse a document and return table dicts + markdown list.
+
+    Tries multiple access strategies (direct HTTP → Exa cache → Playwright
+    → Wayback Machine) before giving up.
+    """
+    exa_key = os.environ.get("EXA_API_KEY")
+    table_dicts, method, elapsed = parse_with_fallbacks(
+        url=url,
+        llama_key=llama_key,
+        exa_key=exa_key,
+        source_type=source_type,
+    )
+    if method != "direct":
+        log.info(f"    Fetched via {method} fallback ({elapsed:.1f}s)")
     tables_md = [t["markdown"] for t in table_dicts]
     return table_dicts, tables_md
 
