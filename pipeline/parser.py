@@ -24,12 +24,12 @@ _BROWSER_HEADERS = {
 
 def download_to_tempfile(url: str) -> str:
     """Download a URL to a temporary file and return the local path."""
-    response = requests.get(url, headers=_BROWSER_HEADERS, timeout=120)
+    response = requests.get(url, headers=_BROWSER_HEADERS, timeout=(5, 60))
     if response.status_code == 403:
         from urllib.parse import urlparse
         parsed = urlparse(url)
         headers = {**_BROWSER_HEADERS, "Referer": f"{parsed.scheme}://{parsed.netloc}/"}
-        response = requests.get(url, headers=headers, timeout=120)
+        response = requests.get(url, headers=headers, timeout=(5, 60))
     response.raise_for_status()
 
     suffix = ".pdf" if url.lower().split("?")[0].endswith(".pdf") else ".html"
@@ -114,7 +114,7 @@ def parse_excel(source: str) -> list[dict]:
     Returns list of {markdown: str, html_snippet: str}.
     """
     if source.startswith("http://") or source.startswith("https://"):
-        resp = requests.get(source, headers=_BROWSER_HEADERS, timeout=60)
+        resp = requests.get(source, headers=_BROWSER_HEADERS, timeout=(5, 30))
         resp.raise_for_status()
         file_obj = io.BytesIO(resp.content)
     else:
@@ -161,7 +161,7 @@ def parse_html(url: str) -> list[dict]:
 
     Returns list of {markdown: str, html_snippet: str}.
     """
-    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=60)
+    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=(5, 15))
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     tables = []
@@ -177,7 +177,7 @@ def parse_html(url: str) -> list[dict]:
 
 def extract_html_text(url: str) -> str:
     """Fetch an HTML page and return clean text (fallback when no tables found)."""
-    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=60)
+    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=(5, 15))
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header"]):

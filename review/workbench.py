@@ -117,6 +117,11 @@ def _default_search_ranking_prompt(company_name, year):
         "4. Reputable ESG data providers\n"
         "AVOID: news articles, blog posts, third-party aggregators "
         "(GuruFocus, Macrotrends, etc.)\n\n"
+        "LINK TYPE PRIORITY:\n"
+        "1. Direct links to PDF documents (URLs ending in .pdf) — STRONGLY PREFER\n"
+        "2. Specific report pages with downloadable content\n"
+        "3. DEPRIORITISE: index/landing pages like 'Results, reports and presentations', "
+        "'Investor relations', 'Document library' — these list reports but don't contain data\n\n"
         "Prefer PDF sustainability reports, annual reports, and ESG reports. "
         "Prefer reports from the parent/group company rather than subsidiaries. "
         "Include only results with a reasonable chance of containing the data."
@@ -408,26 +413,54 @@ top_title = ranked[selected_doc_idx]["title"]
 
 st.header("3️⃣ Parse Document")
 
-source_type = detect_source_type(top_url)
-st.write(f"Parsing: **{top_title}**")
-st.caption(f"{source_type.upper()} — {top_url}")
+# Build candidate list: selected doc first, then remaining ranked docs in order
+parse_candidates = [ranked[selected_doc_idx]] + [
+    r for i, r in enumerate(ranked) if i != selected_doc_idx
+]
 
-with st.spinner("Parsing document (this may take 30-60s for large PDFs)…"):
-    t0 = time.time()
-    try:
-        table_dicts = []
-        if source_type == "pdf":
-            documents = parse_pdf(top_url, LLAMA_KEY)
-            table_dicts = extract_tables_from_documents(documents)
-        elif source_type == "excel":
-            table_dicts = parse_excel(top_url)
-        else:
-            table_dicts = parse_html(top_url)
-        tables_md = [t["markdown"] for t in table_dicts]
-        parse_time = time.time() - t0
-    except Exception as e:
-        st.error(f"Parsing failed: {e}")
-        st.stop()
+table_dicts = []
+tables_md = []
+parse_time = 0.0
+parsed_url = None
+parsed_title = None
+
+for cand_idx, candidate in enumerate(parse_candidates):
+    cand_url = candidate["url"]
+    cand_title = candidate["title"]
+    source_type = detect_source_type(cand_url)
+
+    if cand_idx == 0:
+        st.write(f"Parsing: **{cand_title}**")
+    else:
+        st.info(f"⏩ Auto-fallback → trying candidate {cand_idx + 1}: **{cand_title}**")
+    st.caption(f"{source_type.upper()} — {cand_url}")
+
+    with st.spinner(f"Parsing {'(fallback) ' if cand_idx > 0 else ''}document…"):
+        t0 = time.time()
+        try:
+            if source_type == "pdf":
+                documents = parse_pdf(cand_url, LLAMA_KEY)
+                table_dicts = extract_tables_from_documents(documents)
+            elif source_type == "excel":
+                table_dicts = parse_excel(cand_url)
+            else:
+                table_dicts = parse_html(cand_url)
+            tables_md = [t["markdown"] for t in table_dicts]
+            parse_time = time.time() - t0
+            parsed_url = cand_url
+            parsed_title = cand_title
+            break  # success — stop trying
+        except Exception as e:
+            elapsed = time.time() - t0
+            st.warning(f"⚠️ Failed in {elapsed:.1f}s: {e}")
+            if cand_idx == len(parse_candidates) - 1:
+                st.error("All candidates failed to parse.")
+                st.stop()
+            continue
+
+# Update top_url/top_title for downstream steps
+top_url = parsed_url
+top_title = parsed_title
 
 st.success(f"Found **{len(tables_md)}** tables in {parse_time:.1f}s")
 
