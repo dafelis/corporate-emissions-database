@@ -140,6 +140,13 @@ def _strategy_direct(url: str, source_type: str, llama_key: str) -> list[dict]:
 
         return parse_excel(url)
     else:
+        # For HTML, do a quick HEAD check first to fail fast on blocked sites
+        try:
+            head_resp = requests.head(url, headers=_BROWSER_HEADERS, timeout=5, allow_redirects=True)
+            head_resp.raise_for_status()
+        except Exception as e:
+            raise ValueError(f"Site unreachable: {e}")
+
         from pipeline.parser import parse_html
 
         tables = parse_html(url)
