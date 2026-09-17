@@ -466,22 +466,33 @@ st.header("3️⃣ Parse Document")
 
 # Streamlit-aware progress callbacks
 _STRATEGY_LABELS = {
-    "cache": ("📦 Local cache", "Checking locally cached copy of the document"),
-    "direct": ("🌐 Direct HTTP", "Fetching directly from the source website"),
-    "exa_cache": ("🔍 Exa cache", "Retrieving Exa's pre-crawled copy of the page"),
-    "playwright": ("🖥️ Headless browser", "Opening in headless Chrome to bypass bot detection"),
-    "wayback": ("🏛️ Wayback Machine", "Checking Internet Archive for a cached copy"),
+    "cache":      ("📦 Local cache",      "Checking locally cached copy of the document"),
+    "direct":     ("🌐 Direct HTTP",       "Fetching directly from the source website"),
+    "exa_cache":  ("🔍 Exa cache",         "Retrieving Exa's pre-crawled copy of the page"),
+    "playwright": ("🖥️ Headless browser",  "Opening in headless Chrome to bypass bot detection"),
+    "wayback":    ("🏛️ Wayback Machine",   "Checking Internet Archive for a cached copy"),
+}
+
+_STRATEGY_PDF_OVERRIDES = {
+    "direct":     "Downloading PDF and sending to LlamaParse for table extraction — large reports can take 60-90s…",
+    "playwright": "Downloading PDF via headless Chrome, then sending to LlamaParse — this can take 60-90s…",
+    "wayback":    "Downloading archived PDF from Wayback Machine, then sending to LlamaParse…",
 }
 
 class _StProgress(ParseProgress):
-    def __init__(self):
+    def __init__(self, is_pdf=False):
         self._container = st.container()
         self._status = None
+        self._is_pdf = is_pdf
+        self._t0 = None
 
     def on_trying(self, method, url):
         label, desc = _STRATEGY_LABELS.get(method, (method, ""))
+        if self._is_pdf and method in _STRATEGY_PDF_OVERRIDES:
+            desc = _STRATEGY_PDF_OVERRIDES[method]
         self._status = self._container.status(f"{label}…", expanded=True)
         self._status.write(desc)
+        self._t0 = time.time()
 
     def on_success(self, method, elapsed, table_count):
         label, _ = _STRATEGY_LABELS.get(method, (method, ""))
@@ -519,7 +530,7 @@ for cand_idx, candidate in enumerate(parse_candidates):
         st.info(f"⏩ Candidate {cand_idx + 1}: **{cand_title}**")
     st.caption(f"{source_type.upper()} — {cand_url}")
 
-    progress = _StProgress()
+    progress = _StProgress(is_pdf=(source_type == "pdf"))
     try:
         table_dicts, method, elapsed = parse_with_fallbacks(
             url=cand_url,
