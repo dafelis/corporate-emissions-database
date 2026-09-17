@@ -250,10 +250,16 @@ min_table_score = st.sidebar.slider("Min table relevance score", 0, 100, 30)
 st.sidebar.markdown("---")
 st.sidebar.subheader("Prompts")
 
+# Reset the search prompt when company or year changes
+_prompt_key = f"search_prompt_{company_name}_{target_year}"
+if "last_prompt_key" not in st.session_state or st.session_state.last_prompt_key != _prompt_key:
+    st.session_state.last_prompt_key = _prompt_key
+    st.session_state.search_prompt_val = _default_search_ranking_prompt(company_name, target_year)
+
 with st.sidebar.expander("Search ranking prompt"):
     search_ranking_prompt = st.text_area(
         "Prompt sent to Claude to rank Exa results",
-        value=_default_search_ranking_prompt(company_name, target_year),
+        value=st.session_state.search_prompt_val,
         height=200,
         key="search_prompt",
     )
