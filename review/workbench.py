@@ -462,20 +462,35 @@ if not st.session_state.get("parse_confirmed"):
 st.header("3️⃣ Parse Document")
 
 # Streamlit-aware progress callbacks
+_STRATEGY_LABELS = {
+    "cache": ("📦 Local cache", "Checking locally cached copy of the document"),
+    "direct": ("🌐 Direct HTTP", "Fetching directly from the source website"),
+    "exa_cache": ("🔍 Exa cache", "Retrieving Exa's pre-crawled copy of the page"),
+    "playwright": ("🖥️ Headless browser", "Opening in headless Chrome to bypass bot detection"),
+    "wayback": ("🏛️ Wayback Machine", "Checking Internet Archive for a cached copy"),
+}
+
 class _StProgress(ParseProgress):
     def __init__(self):
         self._container = st.container()
+        self._status = None
 
     def on_trying(self, method, url):
-        self._container.write(f"🔄 Trying **{method}**…")
+        label, desc = _STRATEGY_LABELS.get(method, (method, ""))
+        self._status = self._container.status(f"{label}…", expanded=True)
+        self._status.write(desc)
 
     def on_success(self, method, elapsed, table_count):
-        self._container.success(
-            f"✅ **{method}** succeeded — {table_count} table(s) in {elapsed:.1f}s"
-        )
+        label, _ = _STRATEGY_LABELS.get(method, (method, ""))
+        if self._status:
+            self._status.update(label=f"{label} ✅ {table_count} table(s) in {elapsed:.1f}s", state="complete")
 
     def on_fail(self, method, error, elapsed):
-        self._container.warning(f"⚠️ **{method}** failed ({elapsed:.1f}s): {error}")
+        label, _ = _STRATEGY_LABELS.get(method, (method, ""))
+        if self._status:
+            short_error = str(error)[:120]
+            self._status.update(label=f"{label} ⚠️ failed ({elapsed:.1f}s)", state="error")
+            self._status.write(f"_{short_error}_")
 
 
 # Build candidate list: selected doc first, then remaining ranked docs in order
