@@ -251,15 +251,16 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Prompts")
 
 # Reset the search prompt when company or year changes
-_prompt_key = f"search_prompt_{company_name}_{target_year}"
-if "last_prompt_key" not in st.session_state or st.session_state.last_prompt_key != _prompt_key:
-    st.session_state.last_prompt_key = _prompt_key
-    st.session_state.search_prompt_val = _default_search_ranking_prompt(company_name, target_year)
+_prompt_key = f"{company_name}|{target_year}"
+if st.session_state.get("_last_prompt_key") != _prompt_key:
+    st.session_state["_last_prompt_key"] = _prompt_key
+    st.session_state["search_prompt"] = _default_search_ranking_prompt(company_name, target_year)
+    # Also reset the parse gate so user must re-confirm after changing company
+    st.session_state.pop("parse_confirmed", None)
 
 with st.sidebar.expander("Search ranking prompt"):
     search_ranking_prompt = st.text_area(
         "Prompt sent to Claude to rank Exa results",
-        value=st.session_state.search_prompt_val,
         height=200,
         key="search_prompt",
     )
@@ -335,65 +336,95 @@ search_query = search_query_override.strip() or (
 )
 st.code(search_query, language=None)
 
-with st.spinner(f"Searching Exa for {num_exa_results} results…"):
-    t0 = time.time()
-    try:
-        exa_response = exa.search(search_query, num_results=num_exa_results, type="auto")
-        search_results = exa_response.results
-        search_time = time.time() - t0
-    except Exception as e:
-        st.error(f"Search failed: {e}")
-        st.stop()
+# Cache key for Steps 1-2 so they don't re-run when clicking Parse
+_run_key = f"{company_name}|{target_year}|{search_query}|{num_exa_results}|{ranking_model}|{search_ranking_prompt}"
+_cached = st.session_state.get("_steps12_cache", {})
 
-st.success(f"Found **{len(search_results)}** results in {search_time:.1f}s")
+if _cached.get("key") == _run_key:
+    # Re-use cached results
+    search_results = _cached["search_results"]
+    search_time = _cached["search_time"]
+    ranked = _cached["ranked"]
+    rank_time = _cached["rank_time"]
+    cost = _cached["cost"]
+    st.success(f"Found **{len(search_results)}** results in {search_time:.1f}s *(cached)*")
+else:
+    with st.spinner(f"Searching Exa for {num_exa_results} results…"):
+        t0 = time.time()
+        try:
+            exa_response = exa.search(search_query, num_results=num_exa_results, type="auto")
+            # Convert to plain dicts so they're cacheable in session_state
+            search_results = [
+                {"url": r.url, "title": getattr(r, "title", None) or "(no title)"}
+                for r in exa_response.results
+            ]
+            search_time = time.time() - t0
+        except Exception as e:
+            st.error(f"Search failed: {e}")
+            st.stop()
+
+    st.success(f"Found **{len(search_results)}** results in {search_time:.1f}s")
 
 for i, r in enumerate(search_results):
-    is_pdf = r.url.lower().split("?")[0].endswith(".pdf")
+    is_pdf = r["url"].lower().split("?")[0].endswith(".pdf")
     icon = "📄" if is_pdf else "🌐"
-    st.write(f"{i + 1}. {icon} **{r.title or '(no title)'}**")
-    st.caption(r.url)
+    st.write(f"{i + 1}. {icon} **{r['title']}**")
+    st.caption(r["url"])
 
 
 # ── STEP 2: Rank search results ──────────────────────────────────────
 
 st.header("2️⃣ Rank Search Results")
 
-# Sort PDFs first (same as pipeline)
-pdf_results = [r for r in search_results if r.url.lower().split("?")[0].endswith(".pdf")]
-other_results = [r for r in search_results if not r.url.lower().split("?")[0].endswith(".pdf")]
-sorted_results = pdf_results + other_results
+if _cached.get("key") == _run_key:
+    st.success(f"Ranked **{len(ranked)}** results in {rank_time:.1f}s *(cached)*")
+else:
+    # Sort PDFs first (same as pipeline)
+    pdf_results = [r for r in search_results if r["url"].lower().split("?")[0].endswith(".pdf")]
+    other_results = [r for r in search_results if not r["url"].lower().split("?")[0].endswith(".pdf")]
+    sorted_results = pdf_results + other_results
 
-results_text = "\n".join(
-    f"{i + 1}. Title: {r.title or '(no title)'}\n   URL: {r.url}"
-    for i, r in enumerate(sorted_results)
-)
+    results_text = "\n".join(
+        f"{i + 1}. Title: {r['title']}\n   URL: {r['url']}"
+        for i, r in enumerate(sorted_results)
+    )
 
-with st.expander("Ranking prompt sent to Claude"):
-    st.text(search_ranking_prompt + "\n\nSearch results:\n" + results_text)
+    with st.expander("Ranking prompt sent to Claude"):
+        st.text(search_ranking_prompt + "\n\nSearch results:\n" + results_text)
 
-with st.spinner(f"Ranking with {ranking_model_name}…"):
-    t0 = time.time()
-    try:
-        rank_resp = client.messages.create(
-            model=ranking_model,
-            max_tokens=1024,
-            messages=[{
-                "role": "user",
-                "content": f"{search_ranking_prompt}\n\nSearch results:\n{results_text}",
-            }],
-            output_config={
-                "format": {"type": "json_schema", "schema": RANKED_RESULTS_SCHEMA},
-            },
-        )
-        _track_cost(rank_resp, ranking_model, cost)
-        rank_text = next((b.text for b in rank_resp.content if b.type == "text"), None)
-        ranked = json.loads(rank_text).get("ranked", []) if rank_text else []
-        rank_time = time.time() - t0
-    except Exception as e:
-        st.error(f"Ranking failed: {e}")
-        st.stop()
+    with st.spinner(f"Ranking with {ranking_model_name}…"):
+        t0 = time.time()
+        try:
+            rank_resp = client.messages.create(
+                model=ranking_model,
+                max_tokens=1024,
+                messages=[{
+                    "role": "user",
+                    "content": f"{search_ranking_prompt}\n\nSearch results:\n{results_text}",
+                }],
+                output_config={
+                    "format": {"type": "json_schema", "schema": RANKED_RESULTS_SCHEMA},
+                },
+            )
+            _track_cost(rank_resp, ranking_model, cost)
+            rank_text = next((b.text for b in rank_resp.content if b.type == "text"), None)
+            ranked = json.loads(rank_text).get("ranked", []) if rank_text else []
+            rank_time = time.time() - t0
+        except Exception as e:
+            st.error(f"Ranking failed: {e}")
+            st.stop()
 
-st.success(f"Ranked **{len(ranked)}** results in {rank_time:.1f}s")
+    st.success(f"Ranked **{len(ranked)}** results in {rank_time:.1f}s")
+
+    # Cache results for re-use when clicking Parse
+    st.session_state["_steps12_cache"] = {
+        "key": _run_key,
+        "search_results": search_results,
+        "search_time": search_time,
+        "ranked": ranked,
+        "rank_time": rank_time,
+        "cost": dict(cost),
+    }
 
 for i, r in enumerate(ranked):
     medal = "🥇" if i == 0 else ("🥈" if i == 1 else ("🥉" if i == 2 else f"{i + 1}."))
@@ -414,6 +445,15 @@ selected_doc_idx = st.selectbox(
 )
 top_url = ranked[selected_doc_idx]["url"]
 top_title = ranked[selected_doc_idx]["title"]
+
+# Gate: let user review ranked results and pick a document before proceeding
+st.markdown("---")
+if st.button("▶️ Parse selected document", type="primary"):
+    st.session_state["parse_confirmed"] = True
+
+if not st.session_state.get("parse_confirmed"):
+    st.info("👆 Review the ranked results, select a document from the dropdown, then click **Parse** to continue.")
+    st.stop()
 
 
 # ── STEP 3: Parse document ───────────────────────────────────────────
