@@ -70,17 +70,32 @@ def _tables_or_text_from_docs(docs: list) -> list[dict]:
     separator rows), return those.  Otherwise return the full text so the
     LLM extraction step can still find emissions data in unstructured text.
     """
+    if not docs:
+        log.warning("LlamaParse returned 0 documents")
+        return []
+
     tables = extract_tables_from_documents(docs)
     if tables:
+        log.info("Found %d structured table(s) across %d page(s)", len(tables), len(docs))
         return tables
+
+    page_lens = [len(doc.text or "") for doc in docs]
+    total_chars = sum(page_lens)
+    log.info(
+        "LlamaParse: %d page(s), %d total chars, 0 markdown tables. "
+        "Page lengths: %s",
+        len(docs), total_chars,
+        page_lens[:10] if len(page_lens) <= 10 else page_lens[:5] + ["..."],
+    )
+
     all_text = "\n\n".join(doc.text for doc in docs if doc.text)
     if all_text and len(all_text.strip()) > 100:
-        log.info(
-            "LlamaParse returned %d page(s) but no markdown tables — "
-            "falling back to full text (%d chars)",
-            len(docs), len(all_text),
-        )
+        pipe_lines = sum(1 for line in all_text.split("\n") if line.strip().startswith("|"))
+        if pipe_lines:
+            log.info("  %d lines start with '|' but no valid separator row found", pipe_lines)
         return [{"markdown": all_text[:50_000]}]
+
+    log.warning("LlamaParse returned %d page(s) with no useful text", len(docs))
     return []
 
 
