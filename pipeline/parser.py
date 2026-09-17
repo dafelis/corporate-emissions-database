@@ -23,7 +23,11 @@ _BROWSER_HEADERS = {
 
 
 def download_to_tempfile(url: str) -> str:
-    """Download a URL to a temporary file and return the local path."""
+    """Download a URL to a temporary file and return the local path.
+
+    For PDF URLs, validates that the response is actually a PDF (not an
+    HTML bot-block page served with a 200 status).
+    """
     response = requests.get(url, headers=_BROWSER_HEADERS, timeout=(5, 60))
     if response.status_code == 403:
         from urllib.parse import urlparse
@@ -32,7 +36,26 @@ def download_to_tempfile(url: str) -> str:
         response = requests.get(url, headers=headers, timeout=(5, 60))
     response.raise_for_status()
 
-    suffix = ".pdf" if url.lower().split("?")[0].endswith(".pdf") else ".html"
+    is_pdf_url = url.lower().split("?")[0].endswith(".pdf")
+    suffix = ".pdf" if is_pdf_url else ".html"
+
+    # Validate PDF responses — some sites return HTML bot-block pages
+    # with a 200 status even for .pdf URLs
+    if is_pdf_url:
+        content_type = response.headers.get("content-type", "").lower()
+        if "html" in content_type:
+            raise ValueError(
+                f"Expected PDF but got HTML (Content-Type: {content_type}) — "
+                f"site likely blocked automated access"
+            )
+        if not response.content[:5].startswith(b"%PDF"):
+            # Not a valid PDF — might be an HTML error page or redirect
+            preview = response.content[:200].decode("utf-8", errors="replace")
+            raise ValueError(
+                f"Expected PDF but got non-PDF content "
+                f"({len(response.content)} bytes, starts with: {preview[:80]}…)"
+            )
+
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(response.content)
         return tmp.name
