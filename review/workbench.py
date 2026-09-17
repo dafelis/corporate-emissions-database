@@ -255,8 +255,10 @@ _prompt_key = f"{company_name}|{target_year}"
 if st.session_state.get("_last_prompt_key") != _prompt_key:
     st.session_state["_last_prompt_key"] = _prompt_key
     st.session_state["search_prompt"] = _default_search_ranking_prompt(company_name, target_year)
-    # Also reset the parse gate so user must re-confirm after changing company
+    # Reset pipeline state so user starts fresh for new company/year
     st.session_state.pop("parse_confirmed", None)
+    st.session_state.pop("pipeline_started", None)
+    st.session_state.pop("_steps12_cache", None)
 
 with st.sidebar.expander("Search ranking prompt"):
     search_ranking_prompt = st.text_area(
@@ -282,9 +284,8 @@ with st.sidebar.expander("Extraction system prompt"):
     )
 
 st.sidebar.markdown("---")
-run_pipeline = st.sidebar.button(
-    "▶ Run Pipeline", type="primary", use_container_width=True,
-)
+if st.sidebar.button("▶ Run Pipeline", type="primary", use_container_width=True):
+    st.session_state["pipeline_started"] = True
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -295,7 +296,7 @@ st.title("Emissions Extraction Workbench")
 st.caption(f"**{company_name}** — {target_year}  ·  "
            f"Ranking: {ranking_model_name}  ·  Extraction: {extraction_model_name}")
 
-if not run_pipeline:
+if not st.session_state.get("pipeline_started"):
     # Landing page
     st.info("Configure parameters in the sidebar and click **▶ Run Pipeline** to start.")
     st.markdown("""
