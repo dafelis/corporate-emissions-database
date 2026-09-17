@@ -14,6 +14,8 @@ import sys
 import tempfile
 import time
 
+import requests
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pandas as pd
@@ -668,18 +670,38 @@ for i, tbl in enumerate(tables_to_try):
                 st.code(table_md[:3000], language="markdown")
 
     with screenshot_col:
-        if source_type == "pdf" and page_idx is not None:
+        parsed_source_type = detect_source_type(top_url)
+        if parsed_source_type == "pdf" and page_idx is not None:
             with st.expander(f"📸 PDF page {page_idx}", expanded=True):
-                # Generate screenshot of the PDF page
+                # Generate screenshot of the PDF page using pymupdf
+                # (downloads the PDF again — but only for screenshots,
+                # and cached in session_state so it's done once per page)
                 _screenshot_key = f"screenshot_{top_url}_{page_idx}"
                 if _screenshot_key not in st.session_state:
                     try:
-                        pdf_local = download_to_tempfile(top_url)
-                        tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                        tmp_png.close()
-                        render_pdf_page(pdf_local, page_idx, tmp_png.name)
-                        st.session_state[_screenshot_key] = tmp_png.name
-                        os.unlink(pdf_local)
+                        # Use requests directly with relaxed validation
+                        # (the PDF was already parsed successfully via
+                        # some strategy, so we know it's accessible somehow)
+                        import fitz
+                        resp = requests.get(
+                            top_url, headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                            },
+                            timeout=(5, 30),
+                        )
+                        if resp.content[:5].startswith(b"%PDF"):
+                            tmp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                            tmp_pdf.write(resp.content)
+                            tmp_pdf.close()
+                            tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                            tmp_png.close()
+                            render_pdf_page(tmp_pdf.name, page_idx, tmp_png.name)
+                            st.session_state[_screenshot_key] = tmp_png.name
+                            os.unlink(tmp_pdf.name)
+                        else:
+                            st.caption("PDF blocked — screenshot unavailable")
+                            st.session_state[_screenshot_key] = None
                     except Exception as e:
                         st.caption(f"Could not render page: {e}")
                         st.session_state[_screenshot_key] = None

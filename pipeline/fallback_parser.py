@@ -219,6 +219,11 @@ def _strategy_playwright(url: str, source_type: str, llama_key: str) -> list[dic
                 body = response.body()
                 if len(body) < 500:
                     raise ValueError("Playwright: PDF response too small")
+                if not body[:5].startswith(b"%PDF"):
+                    raise ValueError(
+                        "Playwright: response is not a PDF "
+                        "(site may have returned an HTML page)"
+                    )
 
                 # Save to temp file and parse with LlamaParse
                 tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
