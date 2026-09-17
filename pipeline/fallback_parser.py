@@ -35,8 +35,8 @@ log = logging.getLogger(__name__)
 # Hard per-strategy time limits (seconds).
 # These are wall-clock caps — even if the underlying request timeout hasn't
 # fired, we move on to the next strategy after this many seconds.
-TIMEOUT_HTML = 30   # HTML / Exa / Wayback for HTML pages
-TIMEOUT_PDF = 120   # PDFs need LlamaParse which is slower
+TIMEOUT_HTML = 10   # HTML / Exa / Wayback — blocked sites fail fast
+TIMEOUT_PDF = 90    # PDFs need download + LlamaParse processing
 
 
 def _strategy_timeout(source_type: str) -> int:
