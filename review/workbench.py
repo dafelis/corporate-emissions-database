@@ -11,6 +11,7 @@ Run with:  streamlit run review/workbench.py
 import json
 import os
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -31,6 +32,8 @@ from pipeline.parser import (
     parse_excel,
     extract_html_text,
     detect_source_type,
+    download_to_tempfile,
+    render_pdf_page,
 )
 from pipeline.fallback_parser import parse_with_fallbacks, ParseProgress
 from pipeline.extractor import EMISSIONS_SCHEMA
@@ -638,11 +641,48 @@ for i, tbl in enumerate(tables_to_try):
         continue
 
     table_md = tables_md[idx]
+    table_info = table_dicts[idx] if idx < len(table_dicts) else {}
+    page_idx = table_info.get("page_index")
 
     st.subheader(f"Table {idx}  (relevance: {score})")
 
-    with st.expander("Full table content"):
-        st.code(table_md[:3000] + ("\n…" if len(table_md) > 3000 else ""), language="markdown")
+    # Show a visual preview of the source table
+    preview_col, screenshot_col = st.columns([3, 2])
+
+    with preview_col:
+        with st.expander("📋 Table content (rendered)", expanded=True):
+            try:
+                st.markdown(table_md[:4000] + ("\n…" if len(table_md) > 4000 else ""))
+            except Exception:
+                st.code(table_md[:3000], language="markdown")
+
+    with screenshot_col:
+        if source_type == "pdf" and page_idx is not None:
+            with st.expander(f"📸 PDF page {page_idx}", expanded=True):
+                # Generate screenshot of the PDF page
+                _screenshot_key = f"screenshot_{top_url}_{page_idx}"
+                if _screenshot_key not in st.session_state:
+                    try:
+                        pdf_local = download_to_tempfile(top_url)
+                        tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                        tmp_png.close()
+                        render_pdf_page(pdf_local, page_idx, tmp_png.name)
+                        st.session_state[_screenshot_key] = tmp_png.name
+                        os.unlink(pdf_local)
+                    except Exception as e:
+                        st.caption(f"Could not render page: {e}")
+                        st.session_state[_screenshot_key] = None
+
+                screenshot_path = st.session_state.get(_screenshot_key)
+                if screenshot_path and os.path.exists(screenshot_path):
+                    st.image(screenshot_path, use_container_width=True)
+                else:
+                    st.caption(f"Page {page_idx} — screenshot unavailable")
+        elif table_info.get("html_snippet"):
+            with st.expander("🌐 Source HTML", expanded=True):
+                st.html(table_info["html_snippet"][:5000])
+        else:
+            st.caption(f"Page index: {page_idx if page_idx is not None else 'N/A'}")
 
     with st.spinner(f"Extracting with {extraction_model_name}…"):
         t0 = time.time()
