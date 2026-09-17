@@ -546,7 +546,13 @@ for cand_idx, candidate in enumerate(parse_candidates):
         parsed_url = cand_url
         parsed_title = cand_title
         parse_method = method
-        break  # success — stop trying candidates
+        if tables_md:
+            break  # found tables — stop trying candidates
+        # Document was accessible but had no tables — try next candidate
+        st.info(f"Document accessible but 0 tables extracted — trying next candidate…")
+        if cand_idx == len(parse_candidates) - 1:
+            break  # last candidate — accept the 0-table result
+        continue
     except RuntimeError as e:
         # All strategies failed for this candidate
         st.warning(f"All strategies failed for this candidate")

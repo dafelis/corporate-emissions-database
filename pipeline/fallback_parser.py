@@ -337,6 +337,8 @@ def parse_with_fallbacks(
     if progress is None:
         progress = ParseProgress()
 
+    first_empty: tuple[list[dict], str, float] | None = None
+
     # Check local cache first
     if use_cache:
         cached_path = _check_cache(url, source_type)
@@ -346,8 +348,11 @@ def parse_with_fallbacks(
             try:
                 table_dicts = _parse_local_file(cached_path, source_type, llama_key)
                 elapsed = time.time() - t0
-                progress.on_success("cache", elapsed, len(table_dicts))
-                return table_dicts, "cache", elapsed
+                if table_dicts:
+                    progress.on_success("cache", elapsed, len(table_dicts))
+                    return table_dicts, "cache", elapsed
+                progress.on_fail("cache", "No tables found in cached copy", elapsed)
+                first_empty = (table_dicts, "cache", elapsed)
             except Exception as e:
                 elapsed = time.time() - t0
                 progress.on_fail("cache", str(e), elapsed)
@@ -380,8 +385,17 @@ def parse_with_fallbacks(
         try:
             table_dicts = strategy_fn()
             elapsed = time.time() - t0
-            progress.on_success(method_name, elapsed, len(table_dicts))
-            return table_dicts, method_name, elapsed
+            if table_dicts:
+                progress.on_success(method_name, elapsed, len(table_dicts))
+                return table_dicts, method_name, elapsed
+            # Strategy accessed the document but found 0 tables — try next
+            progress.on_fail(method_name, "No tables found in document", elapsed)
+            if first_empty is None:
+                first_empty = (table_dicts, method_name, elapsed)
+            log.info(
+                "Strategy %s returned 0 tables for %s (%.1fs)",
+                method_name, url, elapsed,
+            )
         except Exception as e:
             elapsed = time.time() - t0
             errors.append((method_name, str(e), elapsed))
@@ -390,6 +404,11 @@ def parse_with_fallbacks(
                 "Strategy %s failed for %s: %s (%.1fs)",
                 method_name, url, e, elapsed,
             )
+
+    # If at least one strategy accessed the document but found no tables,
+    # return that result so the caller knows the document was reachable
+    if first_empty is not None:
+        return first_empty
 
     error_detail = "\n".join(
         f"  {name}: {err} ({t:.1f}s)" for name, err, t in errors
