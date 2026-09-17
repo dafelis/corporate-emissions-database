@@ -16,6 +16,7 @@ import logging
 import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,6 +31,17 @@ from pipeline.parser import (
 )
 
 log = logging.getLogger(__name__)
+
+# Hard per-strategy time limits (seconds).
+# These are wall-clock caps — even if the underlying request timeout hasn't
+# fired, we move on to the next strategy after this many seconds.
+TIMEOUT_HTML = 30   # HTML / Exa / Wayback for HTML pages
+TIMEOUT_PDF = 120   # PDFs need LlamaParse which is slower
+
+
+def _strategy_timeout(source_type: str) -> int:
+    """Return the hard timeout for a strategy given the document type."""
+    return TIMEOUT_PDF if source_type == "pdf" else TIMEOUT_HTML
 
 
 # ── Local document cache ─────────────────────────────────────────────
@@ -360,15 +372,25 @@ def parse_with_fallbacks(
     )
 
     errors: list[tuple[str, str, float]] = []
+    hard_timeout = _strategy_timeout(source_type)
 
     for method_name, strategy_fn in strategies:
         progress.on_trying(method_name, url)
         t0 = time.time()
         try:
-            table_dicts = strategy_fn()
+            # Run strategy in a thread with a hard wall-clock timeout
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(strategy_fn)
+                table_dicts = future.result(timeout=hard_timeout)
             elapsed = time.time() - t0
             progress.on_success(method_name, elapsed, len(table_dicts))
             return table_dicts, method_name, elapsed
+        except FutureTimeout:
+            elapsed = time.time() - t0
+            err_msg = f"Hard timeout after {hard_timeout}s"
+            errors.append((method_name, err_msg, elapsed))
+            progress.on_fail(method_name, err_msg, elapsed)
+            log.info("Strategy %s timed out for %s after %ds", method_name, url, hard_timeout)
         except Exception as e:
             elapsed = time.time() - t0
             errors.append((method_name, str(e), elapsed))
