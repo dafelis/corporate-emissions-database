@@ -13,13 +13,9 @@ Each strategy either returns table_dicts or raises to trigger the next.
 
 import hashlib
 import logging
-import multiprocessing
 import os
-import pickle
 import tempfile
 import time
-import traceback
-from functools import partial
 
 import requests
 from bs4 import BeautifulSoup
@@ -35,16 +31,6 @@ from pipeline.parser import (
 
 log = logging.getLogger(__name__)
 
-# Hard per-strategy time limits (seconds).
-# These are wall-clock caps — even if the underlying request timeout hasn't
-# fired, we move on to the next strategy after this many seconds.
-TIMEOUT_HTML = 10   # HTML / Exa / Wayback — blocked sites fail fast
-TIMEOUT_PDF = 90    # PDFs need download + LlamaParse processing
-
-
-def _strategy_timeout(source_type: str) -> int:
-    """Return the hard timeout for a strategy given the document type."""
-    return TIMEOUT_PDF if source_type == "pdf" else TIMEOUT_HTML
 
 
 # ── Local document cache ─────────────────────────────────────────────
@@ -325,62 +311,6 @@ def _strategy_wayback(url: str, source_type: str, llama_key: str) -> list[dict]:
         raise ValueError("Wayback page has no useful content")
 
 
-# ── Timeout helper ───────────────────────────────────────────────────
-
-def _subprocess_worker(fn, result_file):
-    """Target for multiprocessing.Process — runs fn() and pickles the result."""
-    try:
-        result = fn()
-        with open(result_file, "wb") as f:
-            pickle.dump({"ok": True, "value": result}, f)
-    except Exception as e:
-        with open(result_file, "wb") as f:
-            pickle.dump({"ok": False, "error": f"{type(e).__name__}: {e}"}, f)
-
-
-def _run_with_timeout(fn, timeout_seconds):
-    """Run fn() in a subprocess with a hard wall-clock timeout.
-
-    Unlike ThreadPoolExecutor, this actually kills the work when time is up.
-    Returns the result or raises TimeoutError / RuntimeError.
-    """
-    result_file = os.path.join(
-        tempfile.gettempdir(),
-        f"parse_result_{os.getpid()}_{id(fn)}.pkl",
-    )
-
-    # Clean up any leftover result file
-    if os.path.exists(result_file):
-        os.unlink(result_file)
-
-    proc = multiprocessing.Process(target=_subprocess_worker, args=(fn, result_file))
-    proc.start()
-    proc.join(timeout=timeout_seconds)
-
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(timeout=5)
-        if proc.is_alive():
-            proc.kill()
-            proc.join(timeout=2)
-        # Clean up
-        if os.path.exists(result_file):
-            os.unlink(result_file)
-        raise TimeoutError(f"Killed after {timeout_seconds}s")
-
-    if not os.path.exists(result_file):
-        raise RuntimeError(f"Strategy process exited with code {proc.exitcode} but no result")
-
-    with open(result_file, "rb") as f:
-        result = pickle.load(f)
-    os.unlink(result_file)
-
-    if result["ok"]:
-        return result["value"]
-    else:
-        raise RuntimeError(result["error"])
-
-
 # ── Main fallback chain ──────────────────────────────────────────────
 
 def parse_with_fallbacks(
@@ -418,43 +348,35 @@ def parse_with_fallbacks(
                 progress.on_fail("cache", str(e), elapsed)
                 log.info("Cache parse failed for %s: %s", url, e)
 
-    # Build strategy chain — use partial() (not lambdas) so they're picklable
-    # for multiprocessing
+    # Build strategy chain — each entry is (name, callable)
     strategies: list[tuple[str, callable]] = [
-        ("direct", partial(_strategy_direct, url, source_type, llama_key)),
+        ("direct", lambda: _strategy_direct(url, source_type, llama_key)),
     ]
 
     if exa_key:
         strategies.append(
-            ("exa_cache", partial(_strategy_exa_cache, url, exa_key))
+            ("exa_cache", lambda: _strategy_exa_cache(url, exa_key))
         )
 
     if not skip_playwright:
         strategies.append(
-            ("playwright", partial(_strategy_playwright, url, source_type, llama_key))
+            ("playwright", lambda: _strategy_playwright(url, source_type, llama_key))
         )
 
     strategies.append(
-        ("wayback", partial(_strategy_wayback, url, source_type, llama_key))
+        ("wayback", lambda: _strategy_wayback(url, source_type, llama_key))
     )
 
     errors: list[tuple[str, str, float]] = []
-    hard_timeout = _strategy_timeout(source_type)
 
     for method_name, strategy_fn in strategies:
         progress.on_trying(method_name, url)
         t0 = time.time()
         try:
-            table_dicts = _run_with_timeout(strategy_fn, hard_timeout)
+            table_dicts = strategy_fn()
             elapsed = time.time() - t0
             progress.on_success(method_name, elapsed, len(table_dicts))
             return table_dicts, method_name, elapsed
-        except TimeoutError:
-            elapsed = time.time() - t0
-            err_msg = f"Hard timeout after {hard_timeout}s"
-            errors.append((method_name, err_msg, elapsed))
-            progress.on_fail(method_name, err_msg, elapsed)
-            log.info("Strategy %s timed out for %s after %ds", method_name, url, hard_timeout)
         except Exception as e:
             elapsed = time.time() - t0
             errors.append((method_name, str(e), elapsed))
