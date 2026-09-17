@@ -63,6 +63,27 @@ def _save_to_cache(url: str, content: bytes, source_type: str) -> str:
     return path
 
 
+def _tables_or_text_from_docs(docs: list) -> list[dict]:
+    """Extract tables from LlamaParse docs, falling back to full text.
+
+    If LlamaParse produced structured markdown tables (pipe-delimited with
+    separator rows), return those.  Otherwise return the full text so the
+    LLM extraction step can still find emissions data in unstructured text.
+    """
+    tables = extract_tables_from_documents(docs)
+    if tables:
+        return tables
+    all_text = "\n\n".join(doc.text for doc in docs if doc.text)
+    if all_text and len(all_text.strip()) > 100:
+        log.info(
+            "LlamaParse returned %d page(s) but no markdown tables — "
+            "falling back to full text (%d chars)",
+            len(docs), len(all_text),
+        )
+        return [{"markdown": all_text[:50_000]}]
+    return []
+
+
 def _parse_local_file(path: str, source_type: str, llama_key: str) -> list[dict]:
     """Parse a locally cached file into table_dicts."""
     if source_type == "pdf":
@@ -70,7 +91,7 @@ def _parse_local_file(path: str, source_type: str, llama_key: str) -> list[dict]
 
         parser = LlamaParse(api_key=llama_key, result_type="markdown", verbose=False)
         docs = parser.load_data(path)
-        return extract_tables_from_documents(docs)
+        return _tables_or_text_from_docs(docs)
     elif source_type == "excel":
         from pipeline.parser import parse_excel
 
@@ -123,7 +144,7 @@ def _strategy_direct(url: str, source_type: str, llama_key: str) -> list[dict]:
         from pipeline.parser import parse_pdf
 
         docs = parse_pdf(url, llama_key)
-        return extract_tables_from_documents(docs)
+        return _tables_or_text_from_docs(docs)
     elif source_type == "excel":
         from pipeline.parser import parse_excel
 
@@ -237,7 +258,7 @@ def _strategy_playwright(url: str, source_type: str, llama_key: str) -> list[dic
                         api_key=llama_key, result_type="markdown", verbose=False
                     )
                     docs = parser.load_data(tmp.name)
-                    return extract_tables_from_documents(docs)
+                    return _tables_or_text_from_docs(docs)
                 finally:
                     os.unlink(tmp.name)
             else:
@@ -290,7 +311,7 @@ def _strategy_wayback(url: str, source_type: str, llama_key: str) -> list[dict]:
                 api_key=llama_key, result_type="markdown", verbose=False
             )
             docs = parser.load_data(local_path)
-            return extract_tables_from_documents(docs)
+            return _tables_or_text_from_docs(docs)
         finally:
             os.unlink(local_path)
     else:
