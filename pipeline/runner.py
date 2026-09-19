@@ -311,9 +311,10 @@ def _extract_emissions_round(
     )
 
     # Accumulate emissions from ALL high-scoring tables
-    all_entries = []
+    all_entries = []  # each entry gets a "_table_idx" key for screenshot mapping
     seen_years = set()
     matched_table_idx = None
+    target_year_table_idx = None  # table that contains the target year
     best_confidence = 0
     methodology_notes = ""
 
@@ -353,9 +354,12 @@ def _extract_emissions_round(
                         for entry in extraction["emissions"]:
                             year = entry["reporting_year"]
                             if year not in seen_years:
+                                entry["_table_idx"] = candidate_tbl["index"]
                                 all_entries.append(entry)
                                 seen_years.add(year)
                                 new_this_table += 1
+                                if year == target_year:
+                                    target_year_table_idx = candidate_tbl["index"]
 
                         log.info(f"    Table {candidate_tbl['index']}: "
                                  f"{new_this_table} new year(s), "
@@ -416,8 +420,15 @@ def _extract_emissions_round(
                             log.info(f"    Text pass: added year {year} from text")
 
                     if text_used:
-                        # Screenshot the first emissions-keyword page as evidence
-                        first_page_idx = kw_pages[0][0]
+                        # Screenshot the page that mentions the target year,
+                        # or fall back to the first emissions-keyword page
+                        best_page_idx = kw_pages[0][0]
+                        if target_year:
+                            for pidx, ptxt in kw_pages:
+                                if str(target_year) in ptxt:
+                                    best_page_idx = pidx
+                                    break
+                        first_page_idx = best_page_idx
                         safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
                         screenshots_dir = os.path.join(
                             os.path.dirname(__file__), "..", "screenshots")
@@ -427,17 +438,16 @@ def _extract_emissions_round(
                             f"{safe_name}_text_p{first_page_idx}.png")
                         try:
                             render_pdf_page(pdf_path, first_page_idx, txt_screenshot)
-                            # Update matched_table_idx so _capture_source_preview
-                            # is skipped — we'll set the page_number directly later
-                            if matched_table_idx is None:
-                                matched_table_idx = 0
-                            # Store for source record
+                            # Store text page in table_dicts so screenshot
+                            # capture finds the right page
                             table_dicts.append({
                                 "markdown": "(text extraction)",
                                 "page_index": first_page_idx,
                                 "screenshot_path": txt_screenshot,
                             })
-                            matched_table_idx = len(table_dicts) - 1
+                            target_year_table_idx = len(table_dicts) - 1
+                            if matched_table_idx is None:
+                                matched_table_idx = target_year_table_idx
                             log.info(f"    Text pass: screenshot saved for page "
                                      f"{first_page_idx}")
                         except Exception as e:
@@ -476,9 +486,11 @@ def _extract_emissions_round(
             methodology_notes = extraction.get("methodology_notes", "")
 
     if all_entries:
-        # Capture source preview
+        # Use the table that contained the target year for the screenshot,
+        # falling back to the first table that had any data
+        screenshot_idx = target_year_table_idx or matched_table_idx
         screenshot_path, html_snippet, page_number, s3_pdf_key = (
-            _capture_source_preview(url, source_type, table_dicts, matched_table_idx, company_name)
+            _capture_source_preview(url, source_type, table_dicts, screenshot_idx, company_name)
         )
 
         source = Source(
@@ -505,6 +517,44 @@ def _extract_emissions_round(
             ) if year in covered_years else None
 
             if existing_record:
+                # Check if values differ from a different source
+                values_differ = any(
+                    getattr(existing_record, f) is not None
+                    and entry.get(f) is not None
+                    and getattr(existing_record, f) != entry.get(f)
+                    for f in ("scope_1", "scope_2_location", "scope_2_market", "scope_3")
+                )
+                different_source = existing_record.source_id != source.id
+
+                if values_differ and different_source:
+                    # Different source reports different values — keep both
+                    # (likely a restatement in a later report)
+                    restated = EmissionsRecord(
+                        company_id=company.id,
+                        reporting_year=year,
+                        period_start=_parse_date(entry.get("period_start")),
+                        period_end=_parse_date(entry.get("period_end")),
+                        scope_1=entry.get("scope_1"),
+                        scope_2_location=entry.get("scope_2_location"),
+                        scope_2_market=entry.get("scope_2_market"),
+                        scope_3=entry.get("scope_3"),
+                        scope_3_categories=entry.get("scope_3_categories"),
+                        unit=entry.get("unit", "tonnes CO2e"),
+                        boundary=entry.get("boundary"),
+                        methodology_notes=methodology_notes,
+                        source_id=source.id,
+                        confidence_score=best_confidence,
+                        is_restated=True,
+                        review_status="pending",
+                    )
+                    session.add(restated)
+                    saved += 1
+                    log.info(f"    Year {year}: RESTATED — kept both values "
+                             f"(old source #{existing_record.source_id}, "
+                             f"new source #{source.id})")
+                    continue
+
+                # Same source or compatible values — fill gaps
                 updated = False
                 for field in ("scope_1", "scope_2_location", "scope_2_market", "scope_3"):
                     old_val = getattr(existing_record, field)
@@ -513,7 +563,6 @@ def _extract_emissions_round(
                         setattr(existing_record, field, new_val)
                         updated = True
                     elif is_targeted and new_val is not None and old_val != new_val:
-                        # Targeted search overwrites bonus data
                         setattr(existing_record, field, new_val)
                         updated = True
                 if is_targeted or existing_record.scope_3_categories is None:
