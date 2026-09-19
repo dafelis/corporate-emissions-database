@@ -373,17 +373,16 @@ def _extract_emissions_round(
             pdf_path = download_to_tempfile(url)
             import pymupdf
             pdf_doc = pymupdf.open(pdf_path)
-            kw_pages = []
+            kw_pages = []  # (page_idx, text)
             for page_idx in range(len(pdf_doc)):
                 text = pdf_doc[page_idx].get_text()
                 if text and len(text.strip()) > 100:
                     if any(kw in text.lower() for kw in _EMISSIONS_KEYWORDS):
-                        kw_pages.append(text)
+                        kw_pages.append((page_idx, text))
             pdf_doc.close()
-            os.unlink(pdf_path)
 
             if kw_pages:
-                combined = "\n\n---\n\n".join(kw_pages[:20])
+                combined = "\n\n---\n\n".join(t for _, t in kw_pages[:20])
                 log.info(f"    Text pass: scanning {len(kw_pages)} emissions-related pages")
                 text_ext = extract_emissions_from_text(
                     combined, company_name, client, model=MODEL_FAST,
@@ -400,25 +399,61 @@ def _extract_emissions_round(
                             text_ext = stronger
                             txt_confidence = text_ext.get("confidence_score", 0) or 0
 
+                    text_used = False
                     for entry in text_ext["emissions"]:
                         year = entry["reporting_year"]
                         if year == target_year and year in seen_years:
-                            # Target year: replace table data (chart misreads)
                             all_entries = [e for e in all_entries
                                           if e["reporting_year"] != year]
                             all_entries.append(entry)
+                            text_used = True
                             log.info(f"    Text pass: replaced table data for "
                                      f"target year {year} with text extraction")
                         elif year not in seen_years:
                             all_entries.append(entry)
                             seen_years.add(year)
+                            text_used = True
                             log.info(f"    Text pass: added year {year} from text")
+
+                    if text_used:
+                        # Screenshot the first emissions-keyword page as evidence
+                        first_page_idx = kw_pages[0][0]
+                        safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
+                        screenshots_dir = os.path.join(
+                            os.path.dirname(__file__), "..", "screenshots")
+                        os.makedirs(screenshots_dir, exist_ok=True)
+                        txt_screenshot = os.path.join(
+                            screenshots_dir,
+                            f"{safe_name}_text_p{first_page_idx}.png")
+                        try:
+                            render_pdf_page(pdf_path, first_page_idx, txt_screenshot)
+                            # Update matched_table_idx so _capture_source_preview
+                            # is skipped — we'll set the page_number directly later
+                            if matched_table_idx is None:
+                                matched_table_idx = 0
+                            # Store for source record
+                            table_dicts.append({
+                                "markdown": "(text extraction)",
+                                "page_index": first_page_idx,
+                                "screenshot_path": txt_screenshot,
+                            })
+                            matched_table_idx = len(table_dicts) - 1
+                            log.info(f"    Text pass: screenshot saved for page "
+                                     f"{first_page_idx}")
+                        except Exception as e:
+                            log.warning(f"    Text pass: screenshot failed: {e}")
 
                     if txt_confidence > best_confidence:
                         best_confidence = txt_confidence
                     if text_ext.get("methodology_notes"):
                         methodology_notes = (methodology_notes or "") + " " + \
                             text_ext["methodology_notes"]
+
+            # Clean up temp PDF
+            try:
+                os.unlink(pdf_path)
+            except OSError:
+                pass
         except Exception as e:
             log.warning(f"    PDF text extraction pass failed: {e}")
 
