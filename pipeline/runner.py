@@ -2,8 +2,9 @@
 Main pipeline runner — processes companies one by one, extracting emissions,
 financial data, market data, and industry classifications.
 
-Searches iteratively for reports covering 2019 to present, filling gaps
-with year-targeted queries (up to MAX_SEARCHES per document type).
+Walks backwards from TARGET_END_YEAR to TARGET_START_YEAR, searching for
+each missing year in turn. Bonus years found during a search are kept,
+so earlier years get skipped if already covered.
 """
 
 import logging
@@ -29,6 +30,10 @@ from pipeline.financial_extractor import find_financial_tables, extract_financia
 from pipeline.market_data import get_equity_value_at_date, get_industry_info
 from pipeline.industry_classifier import classify_company
 from pipeline.storage import upload_file
+from pipeline.config import (
+    TARGET_START_YEAR, TARGET_END_YEAR, MAX_SEARCHES,
+    CONFIDENCE_THRESHOLD, MODEL_FAST, MODEL_STRONG,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,16 +41,49 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Configuration ─────────────────────────────────────────────────────────
-TARGET_START_YEAR = 2019
-MAX_SEARCHES_PER_TYPE = 5  # max Exa searches per document type per company
-CONFIDENCE_THRESHOLD = 70  # below this, re-extract with a stronger model
-MODEL_FAST = "claude-haiku-4-5-20251001"  # bulk extraction (cheap)
-MODEL_STRONG = "claude-opus-4-6"          # re-extraction for low-confidence results
+# ── Cost tracking ────────────────────────────────────────────────────────
+
+MODEL_COSTS = {
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-opus-4-6": (15.0, 75.0),
+    "claude-opus-5": (15.0, 75.0),
+}
 
 
-def _current_year():
-    return datetime.utcnow().year
+def _new_cost_tracker():
+    return {"total": 0.0, "calls": 0, "input_tokens": 0, "output_tokens": 0}
+
+
+class _TrackedMessages:
+    """Proxy for client.messages that records token usage and cost."""
+
+    def __init__(self, messages, tracker):
+        self._messages = messages
+        self._tracker = tracker
+
+    def create(self, **kwargs):
+        response = self._messages.create(**kwargs)
+        model = kwargs.get("model", "unknown")
+        usage = response.usage
+        in_rate, out_rate = MODEL_COSTS.get(model, (15.0, 75.0))
+        cost = (usage.input_tokens * in_rate + usage.output_tokens * out_rate) / 1_000_000
+        self._tracker["total"] += cost
+        self._tracker["calls"] += 1
+        self._tracker["input_tokens"] += usage.input_tokens
+        self._tracker["output_tokens"] += usage.output_tokens
+        return response
+
+
+class _TrackedClient:
+    """Wraps an Anthropic client to track API costs transparently."""
+
+    def __init__(self, client, tracker):
+        self._client = client
+        self.messages = _TrackedMessages(client.messages, tracker)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
 
 
 def _parse_document(url, source_type, llama_key):
@@ -120,7 +158,7 @@ def _get_covered_years(session, company_id, model_class):
 
 def _target_years():
     """Return the full set of years we want data for."""
-    return set(range(TARGET_START_YEAR, _current_year() + 1))
+    return set(range(TARGET_START_YEAR, TARGET_END_YEAR + 1))
 
 
 def _get_financial_needs(session, company_id, target_years):
@@ -253,7 +291,7 @@ def _source_quality(title):
 
 def _extract_emissions_round(
     company, company_name, client, anthropic_key, exa_key, llama_key,
-    session, covered_years, searched_urls, target_year=None,
+    session, covered_years, searched_urls, target_year=None, events=None,
 ):
     """Run one search→parse→extract cycle for emissions. Returns count saved.
 
@@ -363,7 +401,9 @@ def _extract_emissions_round(
             if year < TARGET_START_YEAR:
                 continue
 
-            # Upsert: if a record exists, fill in any null scope fields
+            # Is this the year we explicitly searched for?
+            is_targeted = (target_year is not None and year == target_year)
+
             existing_record = (
                 session.query(EmissionsRecord)
                 .filter_by(company_id=company.id, reporting_year=year)
@@ -373,19 +413,32 @@ def _extract_emissions_round(
             if existing_record:
                 updated = False
                 for field in ("scope_1", "scope_2_location", "scope_2_market", "scope_3"):
-                    if getattr(existing_record, field) is None and entry.get(field) is not None:
-                        setattr(existing_record, field, entry[field])
+                    old_val = getattr(existing_record, field)
+                    new_val = entry.get(field)
+                    if old_val is None and new_val is not None:
+                        setattr(existing_record, field, new_val)
                         updated = True
-                if existing_record.scope_3_categories is None and entry.get("scope_3_categories"):
-                    existing_record.scope_3_categories = entry["scope_3_categories"]
-                if existing_record.boundary is None and entry.get("boundary"):
-                    existing_record.boundary = entry["boundary"]
-                if existing_record.period_start is None:
+                    elif is_targeted and new_val is not None and old_val != new_val:
+                        # Targeted search overwrites bonus data
+                        setattr(existing_record, field, new_val)
+                        updated = True
+                if is_targeted or existing_record.scope_3_categories is None:
+                    if entry.get("scope_3_categories"):
+                        existing_record.scope_3_categories = entry["scope_3_categories"]
+                if is_targeted or existing_record.boundary is None:
+                    if entry.get("boundary"):
+                        existing_record.boundary = entry["boundary"]
+                if is_targeted or existing_record.period_start is None:
                     existing_record.period_start = _parse_date(entry.get("period_start"))
-                if existing_record.period_end is None:
+                if is_targeted or existing_record.period_end is None:
                     existing_record.period_end = _parse_date(entry.get("period_end"))
+                if is_targeted:
+                    existing_record.source_id = source.id
+                    existing_record.confidence_score = best_confidence
+                    existing_record.methodology_notes = methodology_notes
                 if updated:
-                    log.info(f"    Updated year {year}: filled in missing emissions fields")
+                    action = "REPLACED (targeted)" if is_targeted else "filled gaps"
+                    log.info(f"    Updated year {year}: {action}")
                     saved += 1
                 continue
 
@@ -412,6 +465,22 @@ def _extract_emissions_round(
 
         session.commit()
 
+        if events is not None:
+            source_evt = {"type": "source", "url": url, "title": title, "years": set()}
+            for entry in all_entries:
+                yr = entry["reporting_year"]
+                if yr >= TARGET_START_YEAR:
+                    source_evt["years"].add(yr)
+                    events.append({
+                        "type": "emissions", "year": yr,
+                        "scope_1": entry.get("scope_1") is not None,
+                        "scope_2": entry.get("scope_2_location") is not None
+                                   or entry.get("scope_2_market") is not None,
+                        "scope_3": entry.get("scope_3") is not None,
+                        "years": {yr},
+                    })
+            events.append(source_evt)
+
     return saved
 
 
@@ -421,7 +490,7 @@ def _extract_emissions_round(
 
 def _extract_financials_from_document(
     url, title, source_type, table_dicts, tables_md,
-    company, company_name, client, session, covered_years,
+    company, company_name, client, session, covered_years, events=None,
 ):
     """Extract financial data from ALL high-scoring tables in a parsed document.
 
@@ -601,12 +670,19 @@ def _extract_financials_from_document(
         saved += 1
 
     session.commit()
+
+    if events is not None and entries_by_year:
+        years_saved = {e["reporting_year"] for e in entries_by_year.values()
+                       if e["reporting_year"] >= TARGET_START_YEAR}
+        events.append({"type": "source", "url": url, "title": title, "years": years_saved})
+        events.append({"type": "financial", "years": years_saved})
+
     return saved
 
 
 def _extract_financials_round(
     company, company_name, client, anthropic_key, exa_key, llama_key,
-    session, covered_years, searched_urls, target_year=None,
+    session, covered_years, searched_urls, target_year=None, events=None,
 ):
     """Run one search→parse→extract cycle for financials. Returns count saved."""
     fin_search = search_for_annual_report(
@@ -620,7 +696,120 @@ def _extract_financials_round(
     return _extract_financials_from_document(
         url, title, source_type, table_dicts, tables_md,
         company, company_name, client, session, covered_years,
+        events=events,
     )
+
+
+# ── Run summary ──────────────────────────────────────────────────────────
+
+def _print_company_summary(company_name, events, cost, elapsed_s):
+    """Print a human-readable summary of what happened during processing."""
+    lines = [
+        "",
+        "═" * 70,
+        f"  SUMMARY: {company_name}",
+        "═" * 70,
+    ]
+
+    # Sources used
+    sources = [e for e in events if e["type"] == "source"]
+    if sources:
+        lines.append("  Sources:")
+        for s in sources:
+            lines.append(f"    • {s['title']}")
+            lines.append(f"      {s['url'][:80]}{'…' if len(s['url']) > 80 else ''}")
+            if s.get("years"):
+                lines.append(f"      → extracted years: {sorted(s['years'])}")
+
+    # Emissions coverage
+    em_events = [e for e in events if e["type"] == "emissions"]
+    if em_events:
+        all_years = set()
+        for e in em_events:
+            all_years.update(e.get("years", []))
+        lines.append(f"  Emissions: {len(all_years)} year(s) — {sorted(all_years)}")
+        for e in em_events:
+            scopes = []
+            for s in ("scope_1", "scope_2", "scope_3"):
+                if e.get(s):
+                    scopes.append(s.replace("_", " ").title())
+            if scopes:
+                lines.append(f"    {e['year']}: {', '.join(scopes)}")
+
+    # Financial coverage
+    fin_events = [e for e in events if e["type"] == "financial"]
+    if fin_events:
+        all_years = set()
+        for e in fin_events:
+            all_years.update(e.get("years", []))
+        lines.append(f"  Financials: {len(all_years)} year(s) — {sorted(all_years)}")
+
+    # Gaps
+    gap_events = [e for e in events if e["type"] == "gap"]
+    for g in gap_events:
+        lines.append(f"  ⚠ Missing {g['data_type']}: {sorted(g['years'])}")
+
+    # Errors
+    err_events = [e for e in events if e["type"] == "error"]
+    if err_events:
+        lines.append(f"  Errors ({len(err_events)}):")
+        for e in err_events:
+            lines.append(f"    ✗ {e['message'][:100]}")
+
+    # Cost
+    lines.append(f"  Cost: ${cost['total']:.4f} "
+                 f"({cost['calls']} API calls, "
+                 f"{cost['input_tokens']:,} in / {cost['output_tokens']:,} out)")
+    lines.append(f"  Time: {elapsed_s:.0f}s")
+    lines.append("═" * 70)
+    lines.append("")
+
+    for line in lines:
+        log.info(line)
+
+
+def _print_pipeline_summary(results, total_cost, total_elapsed_s):
+    """Print an overall pipeline summary across all companies."""
+    lines = [
+        "",
+        "╔" + "═" * 68 + "╗",
+        "║" + "  PIPELINE RUN COMPLETE".center(68) + "║",
+        "╚" + "═" * 68 + "╝",
+        "",
+    ]
+
+    n_success = sum(1 for r in results if r["status"] == "success")
+    n_skipped = sum(1 for r in results if r["status"] == "skipped")
+    n_failed = sum(1 for r in results if r["status"] == "failed")
+
+    lines.append(f"  Companies: {len(results)} total — "
+                 f"{n_success} processed, {n_skipped} skipped, {n_failed} failed")
+
+    total_em = sum(r.get("emissions_records", 0) for r in results)
+    total_fin = sum(r.get("financial_records", 0) for r in results)
+    lines.append(f"  Records saved: {total_em} emissions, {total_fin} financial")
+
+    # Per-company one-liners
+    if len(results) > 1:
+        lines.append("")
+        for r in results:
+            em = r.get("emissions_records", 0)
+            fin = r.get("financial_records", 0)
+            status_icon = {"success": "✓", "skipped": "–", "failed": "✗"}.get(r["status"], "?")
+            cost_str = f"${r.get('cost_detail', {}).get('total', 0):.4f}"
+            lines.append(f"  {status_icon} {r['company']:30s}  "
+                         f"em={em:2d}  fin={fin:2d}  {cost_str}")
+
+    lines.append("")
+    lines.append(f"  Total cost:  ${total_cost['total']:.4f}")
+    lines.append(f"  Total time:  {total_elapsed_s / 60:.1f} min")
+    lines.append(f"  API calls:   {total_cost['calls']}")
+    lines.append(f"  Tokens:      {total_cost['input_tokens']:,} in / "
+                 f"{total_cost['output_tokens']:,} out")
+    lines.append("")
+
+    for line in lines:
+        log.info(line)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -634,82 +823,88 @@ def process_company(
     llama_key: str,
     session,
 ) -> dict:
-    """Process a single company: iteratively fill 2019–present data.
+    """Process a single company: walk backwards from TARGET_END_YEAR to fill gaps.
 
     Pipeline:
-    1. Iteratively search sustainability reports → extract emissions for all years
-    2. Iteratively search annual reports → extract financials for all years
+    1. Walk backwards through years, searching sustainability reports for emissions
+    2. Walk backwards through years, searching annual reports for financials
     3. yfinance → equity value at fiscal year-end for all financial records
     4. Claude → industry classification (NAICS/NACE/SIC)
 
     Returns a dict with status and details.
     """
-    client = anthropic.Anthropic(api_key=anthropic_key)
+    cost = _new_cost_tracker()
+    raw_client = anthropic.Anthropic(api_key=anthropic_key)
+    client = _TrackedClient(raw_client, cost)
     company_name = company.name
+    events = []
+    t_start = time.time()
     log.info(f"Processing: {company_name}")
 
     target = _target_years()
     has_industry = company.yfinance_sector is not None
 
-    # ── PART 1: Emissions (iterative) ─────────────────────────────────────
+    # ── PART 1: Emissions (backwards walk) ─────────────────────────────────
 
     em_covered = _get_covered_years(session, company.id, EmissionsRecord)
-    em_missing = target - em_covered
+    em_pre_existing = set(em_covered)  # years in DB before this run
+    em_searched_years = set()          # years explicitly targeted during this run
     em_searched_urls = set()
     total_em_saved = 0
+    em_missing = target - em_pre_existing
 
     if em_missing:
-        log.info(f"  Emissions: have {sorted(em_covered) or 'none'}, "
+        log.info(f"  Emissions: have {sorted(em_pre_existing) or 'none'}, "
                  f"missing {sorted(em_missing)}")
 
         search_count = 0
         consecutive_empty = 0
-        while em_missing and search_count < MAX_SEARCHES_PER_TYPE:
-            # First search: broad (latest).
-            # Subsequent: alternate oldest / newest missing year to attack gaps
-            # from both ends.
-            if search_count == 0:
-                target_year = None
-                year_label = " (latest)"
-            elif search_count % 2 == 1:
-                target_year = min(em_missing)
-                year_label = f" (oldest missing: {target_year})"
-            else:
-                target_year = max(em_missing)
-                year_label = f" (newest missing: {target_year})"
+        # Walk backwards: newest year first, then year-1, year-2, ...
+        walk_year = TARGET_END_YEAR
+        while walk_year >= TARGET_START_YEAR and search_count < MAX_SEARCHES:
+            # Skip years that existed before this run OR were explicitly searched
+            if walk_year in em_pre_existing or walk_year in em_searched_years:
+                log.info(f"  Year {walk_year}: already covered, skipping")
+                walk_year -= 1
+                continue
 
-            log.info(f"  Emissions search {search_count + 1}/{MAX_SEARCHES_PER_TYPE}{year_label}")
+            search_count += 1
+            em_searched_years.add(walk_year)
+            log.info(f"  Emissions search {search_count}/{MAX_SEARCHES} "
+                     f"(year {walk_year})")
             try:
                 saved = _extract_emissions_round(
                     company, company_name, client, anthropic_key, exa_key, llama_key,
-                    session, em_covered, em_searched_urls, target_year=target_year,
+                    session, em_covered, em_searched_urls, target_year=walk_year,
+                    events=events,
                 )
                 total_em_saved += saved
-                em_missing = target - em_covered
                 if saved == 0:
                     consecutive_empty += 1
-                    if consecutive_empty >= 2:
-                        log.info("    Two consecutive empty searches, stopping")
+                    if consecutive_empty >= 3:
+                        log.info("    Three consecutive empty searches, stopping")
                         break
                 else:
                     consecutive_empty = 0
             except Exception as e:
                 log.warning(f"    Emissions search failed: {e}")
+                events.append({"type": "error", "message": f"Emissions {walk_year}: {e}"})
                 session.rollback()
                 consecutive_empty += 1
-                if consecutive_empty >= 2:
+                if consecutive_empty >= 3:
                     break
 
-            search_count += 1
+            walk_year -= 1
 
+        em_missing = target - em_covered
         if total_em_saved:
             log.info(f"  Emissions: saved {total_em_saved} records "
                      f"(covering {sorted(em_covered & target)})")
-        still_missing = target - em_covered
-        if still_missing:
-            log.info(f"  Emissions: no data found for years {sorted(still_missing)}")
+        if em_missing:
+            log.info(f"  Emissions: no data found for years {sorted(em_missing)}")
+            events.append({"type": "gap", "data_type": "emissions", "years": em_missing})
 
-    # ── PART 2: Financials (iterative) ────────────────────────────────────
+    # ── PART 2: Financials (backwards walk) ─────────────────────────────────
 
     fin_covered = _get_covered_years(session, company.id, FinancialRecord)
     fin_missing = _get_financial_needs(session, company.id, target)
@@ -721,7 +916,7 @@ def process_company(
                  f"need data for {sorted(fin_missing)}")
 
         # Search 1: try a five-year financial summary first (covers most years in one hit)
-        log.info(f"  Financial search 1/{MAX_SEARCHES_PER_TYPE + 1} (five-year summary)")
+        log.info(f"  Financial search 1 (five-year summary)")
         try:
             fin_history_search = search_for_financial_history(
                 company_name, anthropic_key, exa_key,
@@ -734,57 +929,51 @@ def process_company(
             saved = _extract_financials_from_document(
                 url, title, source_type, table_dicts, tables_md,
                 company, company_name, client, session, fin_covered,
+                events=events,
             )
             total_fin_saved += saved
             fin_missing = _get_financial_needs(session, company.id, target)
         except Exception as e:
             log.warning(f"    Five-year summary search failed: {e}")
+            events.append({"type": "error", "message": f"Financial summary: {e}"})
             session.rollback()
 
-        # Searches 2+: targeted annual reports for remaining gaps.
-        # Prioritize years with NO record over years with just incomplete fields,
-        # then alternate oldest / newest to attack gaps from both ends.
-        search_count = 0
+        # Walk backwards through remaining years
+        search_count = 1  # already used one search for five-year summary
         consecutive_empty = 0
-        while fin_missing and search_count < MAX_SEARCHES_PER_TYPE:
-            # Prefer years with no record at all — incomplete years can be
-            # filled as a side effect when documents happen to cover them.
-            no_record = target - _get_covered_years(session, company.id, FinancialRecord)
-            pick_from = no_record if no_record else fin_missing
+        walk_year = TARGET_END_YEAR
+        while walk_year >= TARGET_START_YEAR and search_count < MAX_SEARCHES:
+            fin_missing = _get_financial_needs(session, company.id, target)
+            if walk_year not in fin_missing:
+                walk_year -= 1
+                continue
 
-            if search_count % 2 == 0:
-                target_year = min(pick_from)
-                label = "no data" if no_record else "incomplete"
-                year_label = f"{label}: {target_year}"
-            else:
-                target_year = max(pick_from)
-                label = "no data" if no_record else "incomplete"
-                year_label = f"{label}: {target_year}"
-
-            log.info(f"  Financial search {search_count + 2}/{MAX_SEARCHES_PER_TYPE + 1} "
-                     f"({year_label})")
+            search_count += 1
+            log.info(f"  Financial search {search_count}/{MAX_SEARCHES} "
+                     f"(year {walk_year})")
             try:
                 saved = _extract_financials_round(
                     company, company_name, client, anthropic_key, exa_key, llama_key,
-                    session, fin_covered, fin_searched_urls, target_year=target_year,
+                    session, fin_covered, fin_searched_urls, target_year=walk_year,
+                    events=events,
                 )
                 total_fin_saved += saved
-                fin_missing = _get_financial_needs(session, company.id, target)
                 if saved == 0:
                     consecutive_empty += 1
-                    if consecutive_empty >= 2:
-                        log.info("    Two consecutive empty searches, stopping")
+                    if consecutive_empty >= 3:
+                        log.info("    Three consecutive empty searches, stopping")
                         break
                 else:
                     consecutive_empty = 0
             except Exception as e:
                 log.warning(f"    Financial search failed: {e}")
+                events.append({"type": "error", "message": f"Financial {walk_year}: {e}"})
                 session.rollback()
                 consecutive_empty += 1
-                if consecutive_empty >= 2:
+                if consecutive_empty >= 3:
                     break
 
-            search_count += 1
+            walk_year -= 1
 
         if total_fin_saved:
             fin_covered = _get_covered_years(session, company.id, FinancialRecord)
@@ -793,6 +982,7 @@ def process_company(
         still_missing = _get_financial_needs(session, company.id, target)
         if still_missing:
             log.info(f"  Financials: still incomplete for years {sorted(still_missing)}")
+            events.append({"type": "gap", "data_type": "financials", "years": still_missing})
 
     # ── PART 3: Market data from yfinance ─────────────────────────────────
 
@@ -859,13 +1049,18 @@ def process_company(
 
     # ── Result ────────────────────────────────────────────────────────────
 
+    elapsed = time.time() - t_start
+    _print_company_summary(company_name, events, cost, elapsed)
+
     if total_em_saved == 0 and total_fin_saved == 0 and not em_missing and not fin_missing:
-        return {"status": "skipped"}
+        return {"status": "skipped", "company": company_name, "cost_detail": cost}
 
     return {
         "status": "success",
+        "company": company_name,
         "emissions_records": total_em_saved,
         "financial_records": total_fin_saved,
+        "cost_detail": cost,
     }
 
 
@@ -890,7 +1085,7 @@ def run_pipeline(
         companies = session.query(Company).all()
 
     log.info(f"Starting pipeline for {len(companies)} companies "
-             f"(target years: {TARGET_START_YEAR}–{_current_year()})")
+             f"(target years: {TARGET_START_YEAR}–{TARGET_END_YEAR})")
 
     run = PipelineRun(
         total_companies=len(companies),
@@ -900,32 +1095,40 @@ def run_pipeline(
     session.commit()
 
     errors = []
-    n_success = 0
-    n_failed = 0
-    n_skipped = 0
+    results = []
+    total_cost = _new_cost_tracker()
+    t_pipeline_start = time.time()
 
     for i, company in enumerate(companies):
         log.info(f"[{i + 1}/{len(companies)}] {company.name}")
         try:
             result = process_company(company, anthropic_key, exa_key, llama_key, session)
-            if result.get("status") == "skipped":
-                n_skipped += 1
-            else:
-                n_success += 1
+            results.append(result)
+            cd = result.get("cost_detail", {})
+            for k in ("total", "calls", "input_tokens", "output_tokens"):
+                total_cost[k] += cd.get(k, 0)
         except Exception as e:
             log.error(f"  FAILED: {e}")
             errors.append(f"{company.name}: {e}")
-            n_failed += 1
+            results.append({"status": "failed", "company": company.name, "cost": 0})
             session.rollback()
 
         if i < len(companies) - 1:
             time.sleep(delay_between)
+
+        n_success = sum(1 for r in results if r["status"] == "success")
+        n_failed = sum(1 for r in results if r["status"] == "failed")
+        n_skipped = sum(1 for r in results if r["status"] == "skipped")
 
         if (i + 1) % 10 == 0:
             run.successful = n_success
             run.failed = n_failed
             run.skipped = n_skipped
             session.commit()
+
+    n_success = sum(1 for r in results if r["status"] == "success")
+    n_failed = sum(1 for r in results if r["status"] == "failed")
+    n_skipped = sum(1 for r in results if r["status"] == "skipped")
 
     run.successful = n_success
     run.failed = n_failed
@@ -935,9 +1138,6 @@ def run_pipeline(
     run.error_log = "\n".join(errors) if errors else None
     session.commit()
 
-    log.info(
-        f"Pipeline complete: {run.successful} succeeded, "
-        f"{run.failed} failed, {run.skipped} skipped"
-    )
+    _print_pipeline_summary(results, total_cost, time.time() - t_pipeline_start)
 
     return run
