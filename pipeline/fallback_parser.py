@@ -108,7 +108,7 @@ def _extract_text_with_pymupdf(pdf_path: str) -> list[dict]:
     results = []
     for page_idx in range(page_count):
         text = pdf_doc[page_idx].get_text()
-        if text and len(text.strip()) > 20:
+        if text and len(text.strip()) > 100:
             results.append({"markdown": text, "page_index": page_idx})
     pdf_doc.close()
 
@@ -125,9 +125,9 @@ def _extract_text_with_pymupdf(pdf_path: str) -> list[dict]:
         log.info("pymupdf: found %d structured table(s) across %d pages", len(all_tables), page_count)
         return all_tables
 
-    all_text = "\n\n".join(r["markdown"] for r in results)
-    log.info("pymupdf: extracted %d chars of text from %d/%d pages", len(all_text), len(results), page_count)
-    return [{"markdown": all_text[:50_000]}]
+    # Return per-page text so the ranking step can identify relevant pages
+    log.info("pymupdf: returning %d pages of text (of %d total) for ranking", len(results), page_count)
+    return results
 
 
 def _parse_pdf_with_fallback(local_path: str, llama_key: str) -> list[dict]:
