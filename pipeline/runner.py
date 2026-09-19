@@ -181,8 +181,12 @@ def _try_parse_candidates(candidates, searched_urls, llama_key, max_attempts=3):
 
         try:
             table_dicts, tables_md = _parse_document(url, source_type, llama_key)
-            log.info(f"    Found: {title} ({source_type})")
-            return url, title, source_type, table_dicts, tables_md
+            if tables_md:
+                log.info(f"    Found: {title} ({source_type}, {len(tables_md)} tables)")
+                return url, title, source_type, table_dicts, tables_md
+            log.warning(f"    {title}: document accessible but 0 tables — trying next candidate")
+            last_error = ValueError("0 tables extracted")
+            continue
         except Exception as e:
             log.warning(f"    {title}: {e} — trying next candidate")
             last_error = e
