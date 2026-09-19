@@ -101,9 +101,9 @@ def _tables_or_text_from_docs(docs: list) -> list[dict]:
 
 def _extract_text_with_pymupdf(pdf_path: str) -> list[dict]:
     """Extract text from a local PDF using pymupdf (no external API)."""
-    import fitz
+    import pymupdf
 
-    pdf_doc = fitz.open(pdf_path)
+    pdf_doc = pymupdf.open(pdf_path)
     page_count = len(pdf_doc)
     results = []
     for page_idx in range(page_count):

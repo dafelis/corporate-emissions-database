@@ -211,7 +211,7 @@ def extract_html_text(url: str) -> str:
 
 def render_pdf_page(pdf_path: str, page_index: int, output_path: str, dpi: int = 150) -> None:
     """Render a single PDF page as a PNG image."""
-    import fitz  # pymupdf
+    import pymupdf as fitz
     doc = fitz.open(pdf_path)
     page = doc[page_index]
     pix = page.get_pixmap(dpi=dpi)

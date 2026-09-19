@@ -688,7 +688,7 @@ for i, tbl in enumerate(tables_to_try):
                         # Use requests directly with relaxed validation
                         # (the PDF was already parsed successfully via
                         # some strategy, so we know it's accessible somehow)
-                        import fitz
+                        import pymupdf as fitz
                         resp = requests.get(
                             top_url, headers={
                                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
