@@ -99,35 +99,51 @@ def _tables_or_text_from_docs(docs: list) -> list[dict]:
     return []
 
 
+_EMISSIONS_KEYWORDS = [
+    "scope 1", "scope 2", "scope 3", "emissions",
+    "ghg", "greenhouse", "co2", "carbon dioxide",
+    "tco2", "tonnes co2", "mt co2", "ktco2",
+]
+
+
 def _extract_text_with_pymupdf(pdf_path: str) -> list[dict]:
     """Extract text from a local PDF using pymupdf (no external API)."""
     import pymupdf
 
     pdf_doc = pymupdf.open(pdf_path)
     page_count = len(pdf_doc)
-    results = []
+    all_pages = []
     for page_idx in range(page_count):
         text = pdf_doc[page_idx].get_text()
         if text and len(text.strip()) > 100:
-            results.append({"markdown": text, "page_index": page_idx})
+            all_pages.append({"markdown": text, "page_index": page_idx})
     pdf_doc.close()
 
-    if not results:
+    if not all_pages:
         log.warning("pymupdf: no text extracted from %d pages", page_count)
         return []
 
-    # Check for structured tables in the extracted text
+    # Check for structured tables first
     all_tables = []
-    for r in results:
+    for r in all_pages:
         for t in _extract_tables_from_text(r["markdown"]):
             all_tables.append({"markdown": t, "page_index": r["page_index"]})
     if all_tables:
         log.info("pymupdf: found %d structured table(s) across %d pages", len(all_tables), page_count)
         return all_tables
 
-    # Return per-page text so the ranking step can identify relevant pages
-    log.info("pymupdf: returning %d pages of text (of %d total) for ranking", len(results), page_count)
-    return results
+    # Filter to pages mentioning emissions-related keywords
+    relevant = [
+        p for p in all_pages
+        if any(kw in p["markdown"].lower() for kw in _EMISSIONS_KEYWORDS)
+    ]
+    if relevant:
+        log.info("pymupdf: %d/%d pages contain emissions keywords", len(relevant), page_count)
+        return relevant
+
+    # No keyword matches — return all pages (capped)
+    log.info("pymupdf: no keyword matches, returning all %d pages", len(all_pages))
+    return all_pages
 
 
 def _parse_pdf_with_fallback(local_path: str, llama_key: str) -> list[dict]:
