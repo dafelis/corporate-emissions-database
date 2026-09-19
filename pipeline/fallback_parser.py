@@ -99,14 +99,63 @@ def _tables_or_text_from_docs(docs: list) -> list[dict]:
     return []
 
 
+def _extract_text_with_pymupdf(pdf_path: str) -> list[dict]:
+    """Extract text from a local PDF using pymupdf (no external API)."""
+    import fitz
+
+    pdf_doc = fitz.open(pdf_path)
+    page_count = len(pdf_doc)
+    results = []
+    for page_idx in range(page_count):
+        text = pdf_doc[page_idx].get_text()
+        if text and len(text.strip()) > 20:
+            results.append({"markdown": text, "page_index": page_idx})
+    pdf_doc.close()
+
+    if not results:
+        log.warning("pymupdf: no text extracted from %d pages", page_count)
+        return []
+
+    # Check for structured tables in the extracted text
+    all_tables = []
+    for r in results:
+        for t in _extract_tables_from_text(r["markdown"]):
+            all_tables.append({"markdown": t, "page_index": r["page_index"]})
+    if all_tables:
+        log.info("pymupdf: found %d structured table(s) across %d pages", len(all_tables), page_count)
+        return all_tables
+
+    all_text = "\n\n".join(r["markdown"] for r in results)
+    log.info("pymupdf: extracted %d chars of text from %d/%d pages", len(all_text), len(results), page_count)
+    return [{"markdown": all_text[:50_000]}]
+
+
+def _parse_pdf_with_fallback(local_path: str, llama_key: str) -> list[dict]:
+    """Parse a local PDF: LlamaParse first, pymupdf if that fails."""
+    file_size = os.path.getsize(local_path)
+    log.info("PDF file: %.1f MB (%d bytes)", file_size / 1_048_576, file_size)
+
+    from llama_parse import LlamaParse
+
+    parser = LlamaParse(api_key=llama_key, result_type="markdown", verbose=False)
+    try:
+        docs = parser.load_data(local_path)
+    except Exception as e:
+        log.warning("LlamaParse error: %s — trying pymupdf", e)
+        return _extract_text_with_pymupdf(local_path)
+
+    tables = _tables_or_text_from_docs(docs)
+    if tables:
+        return tables
+
+    log.info("LlamaParse produced no usable output, trying pymupdf")
+    return _extract_text_with_pymupdf(local_path)
+
+
 def _parse_local_file(path: str, source_type: str, llama_key: str) -> list[dict]:
     """Parse a locally cached file into table_dicts."""
     if source_type == "pdf":
-        from llama_parse import LlamaParse
-
-        parser = LlamaParse(api_key=llama_key, result_type="markdown", verbose=False)
-        docs = parser.load_data(path)
-        return _tables_or_text_from_docs(docs)
+        return _parse_pdf_with_fallback(path, llama_key)
     elif source_type == "excel":
         from pipeline.parser import parse_excel
 
@@ -156,10 +205,11 @@ class ParseProgress:
 def _strategy_direct(url: str, source_type: str, llama_key: str) -> list[dict]:
     """Direct HTTP request — uses parser.py functions with fast timeouts."""
     if source_type == "pdf":
-        from pipeline.parser import parse_pdf
-
-        docs = parse_pdf(url, llama_key)
-        return _tables_or_text_from_docs(docs)
+        local_path = download_to_tempfile(url)
+        try:
+            return _parse_pdf_with_fallback(local_path, llama_key)
+        finally:
+            os.unlink(local_path)
     elif source_type == "excel":
         from pipeline.parser import parse_excel
 
@@ -261,19 +311,13 @@ def _strategy_playwright(url: str, source_type: str, llama_key: str) -> list[dic
                         "(site may have returned an HTML page)"
                     )
 
-                # Save to temp file and parse with LlamaParse
+                # Save to temp file and parse
                 tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
                 tmp.write(body)
                 tmp.close()
 
                 try:
-                    from llama_parse import LlamaParse
-
-                    parser = LlamaParse(
-                        api_key=llama_key, result_type="markdown", verbose=False
-                    )
-                    docs = parser.load_data(tmp.name)
-                    return _tables_or_text_from_docs(docs)
+                    return _parse_pdf_with_fallback(tmp.name, llama_key)
                 finally:
                     os.unlink(tmp.name)
             else:
@@ -317,16 +361,9 @@ def _strategy_wayback(url: str, source_type: str, llama_key: str) -> list[dict]:
     log.info("Wayback snapshot: %s", archived_url)
 
     if source_type == "pdf":
-        # Download the archived PDF, then parse with LlamaParse
         local_path = download_to_tempfile(archived_url)
         try:
-            from llama_parse import LlamaParse
-
-            parser = LlamaParse(
-                api_key=llama_key, result_type="markdown", verbose=False
-            )
-            docs = parser.load_data(local_path)
-            return _tables_or_text_from_docs(docs)
+            return _parse_pdf_with_fallback(local_path, llama_key)
         finally:
             os.unlink(local_path)
     else:
