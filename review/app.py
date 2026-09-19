@@ -129,8 +129,8 @@ _POPUP_STYLES = """
     top:50%; left:50%; transform:translate(-50%,-50%);
     background:#fff; border-radius:12px;
     box-shadow:0 8px 32px rgba(0,0,0,0.25);
-    z-index:1000; max-width:520px; width:90%;
-    max-height:80vh; overflow:hidden;
+    z-index:1000; max-width:720px; width:90%;
+    max-height:85vh; overflow:hidden;
     animation:modalIn .2s ease;
 }
 @keyframes modalIn {
@@ -148,7 +148,7 @@ _POPUP_STYLES = """
 }
 .modal-x:hover { background:#f0f0f0; color:#333; }
 .modal-body {
-    padding:16px 20px 20px; overflow-y:auto; max-height:calc(80vh - 60px);
+    padding:16px 20px 20px; overflow-y:auto; max-height:calc(85vh - 60px);
 }
 .modal-body .src-title { font-weight:600; font-size:14px; margin-bottom:8px; }
 .modal-body .src-meta  { font-size:13px; color:#666; margin-bottom:4px; }
@@ -159,7 +159,22 @@ _POPUP_STYLES = """
     margin-top:12px; border:1px solid #eee;
     border-radius:6px; overflow:hidden;
 }
-.modal-body .src-screenshot img { width:100%; display:block; }
+.modal-body .src-screenshot img {
+    width:100%; display:block; cursor:zoom-in;
+}
+/* Full-screen lightbox for expanded image */
+.img-lightbox {
+    display:none; position:fixed;
+    top:0; left:0; right:0; bottom:0;
+    background:rgba(0,0,0,0.85); z-index:2000;
+    cursor:zoom-out; align-items:center; justify-content:center;
+}
+.img-lightbox.open { display:flex; }
+.img-lightbox img {
+    max-width:95vw; max-height:95vh;
+    object-fit:contain; border-radius:4px;
+    box-shadow:0 4px 24px rgba(0,0,0,0.5);
+}
 @media (prefers-color-scheme: dark) {
     .source-modal { background:#1e1e2e; }
     .modal-hdr   { border-color:#333; }
@@ -200,7 +215,7 @@ function showSource(sid){
     if(s.page) h+=' &nbsp;|&nbsp; Page: '+s.page;
     h+='</div>';
     if(s.url) h+='<div class="src-link"><a href="'+esc(s.url)+'" target="_blank" rel="noopener">Open source document ↗</a></div>';
-    if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'"></div>';
+    if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'" onclick="expandImg(this.src)" title="Click to expand"></div>';
     document.getElementById('modal-title').textContent='Source';
     document.getElementById('modal-body').innerHTML=h;
     document.getElementById('modal-backdrop').style.display='block';
@@ -220,8 +235,22 @@ function closeModal(){
     document.getElementById('modal-backdrop').style.display='none';
     document.getElementById('source-modal').style.display='none';
 }
+function expandImg(src){
+    var lb=document.getElementById('img-lightbox');
+    lb.querySelector('img').src=src;
+    lb.classList.add('open');
+}
+function closeLightbox(){
+    document.getElementById('img-lightbox').classList.remove('open');
+}
 function esc(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal();});
+document.addEventListener('keydown',function(e){
+    if(e.key==='Escape'){
+        var lb=document.getElementById('img-lightbox');
+        if(lb && lb.classList.contains('open')) closeLightbox();
+        else closeModal();
+    }
+});
 """
 
 # ── Modal HTML container ──────────────────────────────────────────────
@@ -234,6 +263,9 @@ _POPUP_MODAL_HTML = """
         <button class="modal-x" onclick="closeModal()">&times;</button>
     </div>
     <div class="modal-body" id="modal-body"></div>
+</div>
+<div id="img-lightbox" class="img-lightbox" onclick="closeLightbox()">
+    <img src="" alt="Expanded screenshot">
 </div>
 """
 
