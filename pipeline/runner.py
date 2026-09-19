@@ -363,7 +363,66 @@ def _extract_emissions_round(
                 except Exception as e:
                     log.warning(f"    Extraction failed for table {candidate_tbl['index']}: {e}")
 
-    # Fallback: extract from page text
+    # PDF text pass: extract from raw page text to catch non-tabular data
+    # (e.g. "Scope 1 emissions 2023: 7.5 Mt CO2e" in running text).
+    # For the target year, text data replaces table data (charts are often
+    # misread; headline text is more reliable).
+    if source_type == "pdf":
+        try:
+            from pipeline.fallback_parser import _EMISSIONS_KEYWORDS
+            pdf_path = download_to_tempfile(url)
+            import pymupdf
+            pdf_doc = pymupdf.open(pdf_path)
+            kw_pages = []
+            for page_idx in range(len(pdf_doc)):
+                text = pdf_doc[page_idx].get_text()
+                if text and len(text.strip()) > 100:
+                    if any(kw in text.lower() for kw in _EMISSIONS_KEYWORDS):
+                        kw_pages.append(text)
+            pdf_doc.close()
+            os.unlink(pdf_path)
+
+            if kw_pages:
+                combined = "\n\n---\n\n".join(kw_pages[:20])
+                log.info(f"    Text pass: scanning {len(kw_pages)} emissions-related pages")
+                text_ext = extract_emissions_from_text(
+                    combined, company_name, client, model=MODEL_FAST,
+                )
+                if text_ext and text_ext.get("emissions"):
+                    txt_confidence = text_ext.get("confidence_score", 0) or 0
+                    if txt_confidence < CONFIDENCE_THRESHOLD:
+                        log.info(f"    Text pass: low confidence ({txt_confidence}), "
+                                 "re-extracting with Opus")
+                        stronger = extract_emissions_from_text(
+                            combined, company_name, client, model=MODEL_STRONG,
+                        )
+                        if stronger and stronger.get("emissions"):
+                            text_ext = stronger
+                            txt_confidence = text_ext.get("confidence_score", 0) or 0
+
+                    for entry in text_ext["emissions"]:
+                        year = entry["reporting_year"]
+                        if year == target_year and year in seen_years:
+                            # Target year: replace table data (chart misreads)
+                            all_entries = [e for e in all_entries
+                                          if e["reporting_year"] != year]
+                            all_entries.append(entry)
+                            log.info(f"    Text pass: replaced table data for "
+                                     f"target year {year} with text extraction")
+                        elif year not in seen_years:
+                            all_entries.append(entry)
+                            seen_years.add(year)
+                            log.info(f"    Text pass: added year {year} from text")
+
+                    if txt_confidence > best_confidence:
+                        best_confidence = txt_confidence
+                    if text_ext.get("methodology_notes"):
+                        methodology_notes = (methodology_notes or "") + " " + \
+                            text_ext["methodology_notes"]
+        except Exception as e:
+            log.warning(f"    PDF text extraction pass failed: {e}")
+
+    # Fallback: extract from page text (HTML sources)
     if not all_entries and source_type == "html":
         log.info("    No table results, trying text fallback")
         page_text = extract_html_text(url)
