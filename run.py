@@ -210,9 +210,9 @@ def cmd_extract(args):
     )
 
     print(f"\nPipeline run complete:")
-    print(f"  Successful: {run.successful}")
-    print(f"  Failed:     {run.failed}")
-    print(f"  Skipped:    {run.skipped}")
+    print(f"  Successful: {run['successful']}")
+    print(f"  Failed:     {run['failed']}")
+    print(f"  Skipped:    {run['skipped']}")
 
 
 def cmd_check(args):

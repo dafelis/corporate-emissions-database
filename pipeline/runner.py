@@ -1283,4 +1283,8 @@ def run_pipeline(
 
     _print_pipeline_summary(results, total_cost, time.time() - t_pipeline_start)
 
-    return run
+    return {
+        "successful": n_success,
+        "failed": n_failed,
+        "skipped": n_skipped,
+    }
