@@ -472,10 +472,20 @@ def _extract_emissions_round(
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
 
-                        # Find the best screenshot page by searching for
-                        # the actual extracted values in the page text
-                        original_pg = _find_best_evidence_page(
-                            entry, filtered_pages, page_texts)
+                        # Use Claude's per-scope page numbers to find
+                        # the best evidence page in the original PDF
+                        best_filtered_pg = (
+                            entry.get("scope_1_page")
+                            or entry.get("scope_3_page")
+                            or entry.get("scope_2_page")
+                            or 1
+                        )
+                        pg_idx = max(0, min(best_filtered_pg - 1,
+                                           len(filtered_pages) - 1))
+                        original_pg = filtered_pages[pg_idx]
+                        log.info(f"    Year {year}: Claude says page "
+                                 f"{best_filtered_pg} of filtered PDF → "
+                                 f"original page {original_pg}")
 
                         if year not in seen_years:
                             img_path = os.path.join(

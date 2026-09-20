@@ -221,7 +221,6 @@ def extract_emissions_from_text(
     return json.loads(text_out)
 
 
-# Schema variant that also asks Claude which page the data came from
 _PDF_EMISSIONS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -234,15 +233,17 @@ _PDF_EMISSIONS_SCHEMA = {
                     "period_start": {"type": "string", "description": "Start of reporting period in YYYY-MM-DD format. Null if not stated."},
                     "period_end": {"type": "string", "description": "End of reporting period in YYYY-MM-DD format. Null if not stated."},
                     "scope_1": {"type": "number", "description": "Scope 1 emissions value, or null if not found"},
+                    "scope_1_page": {"type": "integer", "description": "Document page position (1-indexed) where the Scope 1 value was found, or null"},
                     "scope_2_location": {"type": "number", "description": "Scope 2 location-based value, or null"},
                     "scope_2_market": {"type": "number", "description": "Scope 2 market-based value, or null"},
+                    "scope_2_page": {"type": "integer", "description": "Document page position (1-indexed) where the Scope 2 value was found, or null"},
                     "scope_3": {"type": "number", "description": "Scope 3 total value, or null"},
+                    "scope_3_page": {"type": "integer", "description": "Document page position (1-indexed) where the Scope 3 value was found, or null"},
                     "scope_3_categories": {"type": "string", "description": "Which Scope 3 categories are included, if stated"},
                     "unit": {"type": "string", "description": "Unit of measurement, e.g. 'tonnes CO2e', 'kt CO2e', 'Mt CO2e'"},
                     "boundary": {"type": "string", "description": "Reporting boundary: 'operational control', 'equity share', or 'financial control', if stated"},
-                    "source_page": {"type": "integer", "description": "The page number (1-indexed) in the provided document where this data was found"},
                 },
-                "required": ["reporting_year", "source_page"],
+                "required": ["reporting_year"],
                 "additionalProperties": False,
             },
             "description": "One entry per reporting year found in the document.",
@@ -281,14 +282,15 @@ def extract_emissions_from_pdf(
         pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
     page_instruction = (
-        f"IMPORTANT: This document has {num_pages} pages, numbered 1 to {num_pages}. "
-        "For source_page, report the POSITION of the page within THIS document "
-        "(1 for the first page, 2 for the second, etc.) — NOT any page number "
-        "printed on the page itself. "
-        if num_pages > 0 else
-        "For source_page, report the position of the page within this document "
-        "(1 for the first page, 2 for the second, etc.) — NOT any page number "
-        "printed on the page itself. "
+        f"PAGE TRACKING: This document has exactly {num_pages} pages. "
+        f"Pages are numbered by their POSITION in this document: 1 is the first page, "
+        f"2 is the second, up to {num_pages}. Ignore any page numbers printed on the "
+        "pages themselves — those are from the original report and do not match. "
+        "For each scope value you extract, report which page (by position) you read "
+        "it from in scope_1_page, scope_2_page, and scope_3_page. Scope 1 and Scope 3 "
+        "may be on different pages — report each one individually. "
+        "If a scope value is null, set its page to null too. "
+        if num_pages > 0 else ""
     )
 
     response = client.messages.create(
