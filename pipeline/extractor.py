@@ -353,3 +353,92 @@ def extract_emissions_from_pdf(
     if text_out is None:
         raise ValueError("Claude returned no text response.")
     return json.loads(text_out)
+
+
+def extract_emissions_from_page_images(
+    page_images: list[bytes],
+    company_name: str,
+    client: anthropic.Anthropic,
+    model: str = "claude-haiku-4-5-20251001",
+) -> dict:
+    """Extract emissions by sending each page as a separate image in one call.
+
+    Each entry in page_images is raw PNG bytes for one page. Sending pages
+    as distinct images gives Claude clear page boundaries, solving the
+    page-tracking problem that occurs with multi-page PDF documents.
+    """
+    import base64
+
+    num_pages = len(page_images)
+
+    content = []
+    for i, img_bytes in enumerate(page_images):
+        content.append({
+            "type": "text",
+            "text": f"Page {i + 1} of {num_pages}:",
+        })
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.standard_b64encode(img_bytes).decode("utf-8"),
+            },
+        })
+    content.append({
+        "type": "text",
+        "text": (
+            f"Extract all greenhouse gas emissions data for {company_name} "
+            f"from these {num_pages} pages."
+        ),
+    })
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=8192,
+        system=(
+            "You are an expert at extracting greenhouse gas emissions data from "
+            "sustainability reports. You are given pages from a report as separate "
+            "images, each labelled 'Page X of Y:'. "
+            "Extract Scope 1, Scope 2 (both location-based and market-based if available), "
+            "and Scope 3 emissions for EVERY year present — including "
+            "prior-year comparison columns and historical trend data. "
+            "Normalise all values to the same unit (prefer tonnes CO2e). "
+            "If the document uses kt or Mt, convert to tonnes. "
+            "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
+            "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
+            "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
+            "per employee), or index values. If a cell contains '50%' or "
+            "'50% reduction', that is NOT an emissions value of 50. "
+            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+            "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
+            "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
+            "If not stated, set both to null. "
+            "PAGE TRACKING: Each page image is labelled with its number. For each scope "
+            "value you extract, report the page number from the label where you found "
+            "that value: scope_1_page, scope_2_page, scope_3_page. They may be on "
+            "different pages — report each individually. "
+            "If a scope value is null, set its page to null too. "
+            "If a scope is not present, set its value to null. "
+            "If the pages do not contain any emissions data, return an empty "
+            "emissions array. "
+            "Be precise — read the exact numbers from the pages."
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": _PDF_EMISSIONS_SCHEMA,
+            }
+        },
+    )
+
+    text_out = next((b.text for b in response.content if b.type == "text"), None)
+    if text_out is None:
+        raise ValueError("Claude returned no text response.")
+    return json.loads(text_out)

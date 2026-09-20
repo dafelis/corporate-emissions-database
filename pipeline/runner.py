@@ -27,7 +27,7 @@ from pipeline.parser import (
 from pipeline.fallback_parser import parse_with_fallbacks
 from pipeline.extractor import (
     find_emissions_tables, extract_emissions, extract_emissions_from_text,
-    extract_emissions_from_pdf,
+    extract_emissions_from_pdf, extract_emissions_from_page_images,
 )
 from pipeline.financial_extractor import find_financial_tables, extract_financials, normalise_to_units
 from pipeline.market_data import get_equity_value_at_date, get_industry_info
@@ -411,40 +411,30 @@ def _extract_emissions_round(
                 log.info(f"    PDF extract: {len(kw_page_indices)} emissions-related "
                          f"pages (of {len(pdf_doc)} total)")
 
-                # Build a filtered PDF with only the relevant pages,
-                # stamping each page with its position number so Claude
-                # can read it directly instead of counting pages
+                # Render each filtered page as a separate PNG image
+                # so Claude sees distinct pages with clear boundaries
                 filtered_pages = kw_page_indices[:30]
-                total_fp = len(filtered_pages)
-                filtered_doc = pymupdf.open()
-                for pg in filtered_pages:
-                    filtered_doc.insert_pdf(pdf_doc, from_page=pg, to_page=pg)
-                for i in range(total_fp):
-                    page = filtered_doc[i]
-                    label = f"[PAGE {i + 1} OF {total_fp}]"
-                    rect = page.rect
-                    fontsize = 10
-                    text_width = len(label) * fontsize * 0.5
-                    x = rect.width - text_width - 15
-                    y = 20
-                    page.insert_text(
-                        (x, y), label,
-                        fontsize=fontsize,
-                        color=(1, 0, 0),
-                    )
                 safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
                 debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
                 os.makedirs(debug_dir, exist_ok=True)
+
+                page_images = []
+                for pg in filtered_pages:
+                    pix = pdf_doc[pg].get_pixmap(dpi=150)
+                    page_images.append(pix.tobytes("png"))
+                log.info(f"    Rendered {len(page_images)} pages as images "
+                         f"for vision extraction")
+
+                # Also save filtered PDF for debug inspection
+                filtered_doc = pymupdf.open()
+                for pg in filtered_pages:
+                    filtered_doc.insert_pdf(pdf_doc, from_page=pg, to_page=pg)
                 filtered_path = os.path.join(debug_dir, f"{safe_name}_filtered.pdf")
                 filtered_doc.save(filtered_path)
                 filtered_doc.close()
-                log.info(f"    Filtered PDF saved: {filtered_path} "
-                         f"({len(filtered_pages)} pages, "
-                         f"original indices {filtered_pages})")
 
-                extraction = extract_emissions_from_pdf(
-                    filtered_path, company_name, client, model=MODEL_FAST,
-                    num_pages=len(filtered_pages),
+                extraction = extract_emissions_from_page_images(
+                    page_images, company_name, client, model=MODEL_FAST,
                 )
 
                 # Save debug JSON
@@ -456,11 +446,10 @@ def _extract_emissions_round(
                     confidence = extraction.get("confidence_score", 0) or 0
 
                     if confidence < CONFIDENCE_THRESHOLD:
-                        log.info(f"    PDF extract: low confidence ({confidence}), "
+                        log.info(f"    Image extract: low confidence ({confidence}), "
                                  "re-extracting with Opus")
-                        stronger = extract_emissions_from_pdf(
-                            filtered_path, company_name, client, model=MODEL_STRONG,
-                            num_pages=len(filtered_pages),
+                        stronger = extract_emissions_from_page_images(
+                            page_images, company_name, client, model=MODEL_STRONG,
                         )
                         if stronger and stronger.get("emissions"):
                             extraction = stronger
@@ -488,8 +477,8 @@ def _extract_emissions_round(
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
 
-                        # Map Claude's reported page (from the stamp
-                        # it read on the filtered PDF) to the original
+                        # Map Claude's reported image page number
+                        # back to the original PDF page index
                         best_filtered_pg = (
                             entry.get("scope_1_page")
                             or entry.get("scope_3_page")
@@ -499,7 +488,7 @@ def _extract_emissions_round(
                         pg_idx = max(0, min(best_filtered_pg - 1,
                                            len(filtered_pages) - 1))
                         original_pg = filtered_pages[pg_idx]
-                        log.info(f"    Year {year}: stamp page "
+                        log.info(f"    Year {year}: image page "
                                  f"{best_filtered_pg} → original page "
                                  f"{original_pg}")
 
