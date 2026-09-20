@@ -499,21 +499,31 @@ def _extract_emissions_round(
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
 
-                        # Map Claude's reported image page number
-                        # back to the original PDF page index
+                        # Map Claude's reported page to the original PDF
                         best_filtered_pg = (
                             entry.get("scope_1_page")
                             or entry.get("scope_3_page")
                             or entry.get("scope_2_page")
                             or 1
                         )
-                        pg_idx = max(0, min(best_filtered_pg - 1,
-                                           len(filtered_pages) - 1))
-                        original_pg = filtered_pages[pg_idx]
-                        method = "image" if used_images else "PDF"
-                        log.info(f"    Year {year}: {method} page "
-                                 f"{best_filtered_pg} → original page "
-                                 f"{original_pg}")
+                        if used_images or best_filtered_pg <= len(filtered_pages):
+                            # Position in filtered PDF / image set → map
+                            pg_idx = max(0, min(best_filtered_pg - 1,
+                                               len(filtered_pages) - 1))
+                            original_pg = filtered_pages[pg_idx]
+                            log.info(f"    Year {year}: filtered page "
+                                     f"{best_filtered_pg} → original "
+                                     f"page {original_pg}")
+                        else:
+                            # Claude returned original page number
+                            # (happens with PDF fallback — no stamps)
+                            orig_idx = best_filtered_pg - 1  # 1-indexed → 0-indexed
+                            if orig_idx in filtered_pages:
+                                original_pg = orig_idx
+                            else:
+                                original_pg = min(orig_idx, len(pdf_doc) - 1)
+                            log.info(f"    Year {year}: original page "
+                                     f"{best_filtered_pg} (direct)")
 
                         if year not in seen_years:
                             img_path = os.path.join(
