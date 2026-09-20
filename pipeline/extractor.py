@@ -219,3 +219,82 @@ def extract_emissions_from_text(
     if text_out is None:
         raise ValueError("Claude returned no text response.")
     return json.loads(text_out)
+
+
+def extract_emissions_from_page_image(
+    image_path: str,
+    company_name: str,
+    page_number: int,
+    client: anthropic.Anthropic,
+    model: str = "claude-haiku-4-5-20251001",
+) -> dict:
+    """Extract emissions data from a screenshot of a single PDF page.
+
+    Uses Claude's vision to read the page image directly, preserving
+    spatial layout that text extraction loses.
+    """
+    import base64
+
+    with open(image_path, "rb") as f:
+        image_data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=8192,
+        system=(
+            "You are an expert at extracting greenhouse gas emissions data from "
+            "sustainability report pages. You are looking at a screenshot of a single "
+            "page from a PDF report. "
+            "Extract Scope 1, Scope 2 (both location-based and market-based if available), "
+            "and Scope 3 emissions for EVERY year visible on this page — including "
+            "prior-year comparison columns and historical trend data. "
+            "Normalise all values to the same unit (prefer tonnes CO2e). "
+            "If the page uses kt or Mt, convert to tonnes. "
+            "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
+            "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
+            "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
+            "per employee), or index values. If a cell contains '50%' or "
+            "'50% reduction', that is NOT an emissions value of 50. "
+            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+            "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
+            "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
+            "If not stated, set both to null. "
+            "If a scope is not present on this page, set its value to null. "
+            "If this page does not contain any emissions data at all, return an empty "
+            "emissions array. "
+            "Be precise — read the exact numbers from the page image."
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Extract all greenhouse gas emissions data for {company_name} "
+                            f"from this page (page {page_number + 1} of the PDF report)."
+                        ),
+                    },
+                ],
+            }
+        ],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": EMISSIONS_SCHEMA,
+            }
+        },
+    )
+
+    text_out = next((b.text for b in response.content if b.type == "text"), None)
+    if text_out is None:
+        raise ValueError("Claude returned no text response.")
+    return json.loads(text_out)

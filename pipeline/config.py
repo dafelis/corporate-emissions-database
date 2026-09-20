@@ -1,8 +1,8 @@
 """Pipeline configuration — edit these parameters to control search behaviour."""
 
 # Year range to search for emissions and financial data
-TARGET_START_YEAR = 2023
-TARGET_END_YEAR = 2025
+TARGET_START_YEAR = 2024
+TARGET_END_YEAR = 2024
 
 # Max Exa searches per document type (emissions / financials) per company
 MAX_SEARCHES = 10

@@ -25,7 +25,10 @@ from pipeline.parser import (
     render_pdf_page,
 )
 from pipeline.fallback_parser import parse_with_fallbacks
-from pipeline.extractor import find_emissions_tables, extract_emissions, extract_emissions_from_text
+from pipeline.extractor import (
+    find_emissions_tables, extract_emissions, extract_emissions_from_text,
+    extract_emissions_from_page_image,
+)
 from pipeline.financial_extractor import find_financial_tables, extract_financials, normalise_to_units
 from pipeline.market_data import get_equity_value_at_date, get_industry_info
 from pipeline.industry_classifier import classify_company
@@ -114,9 +117,13 @@ def _capture_source_preview(url, source_type, table_dicts, matched_table_idx, co
 
     if source_type == "pdf" and matched_table_idx is not None:
         page_number = table_dicts[matched_table_idx].get("page_index")
+        existing_screenshot = table_dicts[matched_table_idx].get("screenshot_path")
+
+        if existing_screenshot and os.path.exists(existing_screenshot):
+            screenshot_path = existing_screenshot
         try:
             pdf_local_path = download_to_tempfile(url)
-            if page_number is not None:
+            if page_number is not None and not screenshot_path:
                 safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
                 screenshots_dir = os.path.join(os.path.dirname(__file__), "..", "screenshots")
                 os.makedirs(screenshots_dir, exist_ok=True)
@@ -310,19 +317,133 @@ def _extract_emissions_round(
         candidates, searched_urls, llama_key,
     )
 
-    # Accumulate emissions from ALL high-scoring tables
-    all_entries = []  # each entry gets a "_table_idx" key for screenshot mapping
+    all_entries = []
     seen_years = set()
     matched_table_idx = None
-    target_year_table_idx = None  # table that contains the target year
+    target_year_table_idx = None
     best_confidence = 0
     methodology_notes = ""
 
-    if tables_md:
-        ranked = find_emissions_tables(tables_md, client)
-        top_tables = [r for r in ranked if r["score"] >= 30]
-        if top_tables:
-            for candidate_tbl in top_tables[:10]:
+    # ── Vision-based page-by-page extraction for PDFs ──────────────────
+    if source_type == "pdf":
+        try:
+            from pipeline.fallback_parser import _EMISSIONS_KEYWORDS
+            import pymupdf
+
+            pdf_path = download_to_tempfile(url)
+            pdf_doc = pymupdf.open(pdf_path)
+
+            kw_pages = []
+            for page_idx in range(len(pdf_doc)):
+                text = pdf_doc[page_idx].get_text()
+                if text and len(text.strip()) > 100:
+                    if any(kw in text.lower() for kw in _EMISSIONS_KEYWORDS):
+                        kw_pages.append(page_idx)
+            pdf_doc.close()
+
+            if kw_pages:
+                log.info(f"    Vision pass: {len(kw_pages)} emissions-related pages found")
+                safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
+                screenshots_dir = os.path.join(
+                    os.path.dirname(__file__), "..", "screenshots")
+                os.makedirs(screenshots_dir, exist_ok=True)
+
+                for page_idx in kw_pages[:15]:
+                    img_path = os.path.join(
+                        screenshots_dir, f"{safe_name}_vision_p{page_idx}.png")
+                    try:
+                        render_pdf_page(pdf_path, page_idx, img_path, dpi=200)
+                        extraction = extract_emissions_from_page_image(
+                            img_path, company_name, page_idx, client,
+                            model=MODEL_FAST,
+                        )
+                        # Save raw extraction for debugging
+                        import json as _json
+                        debug_dir = os.path.join(
+                            os.path.dirname(__file__), "..", "debug")
+                        os.makedirs(debug_dir, exist_ok=True)
+                        debug_path = os.path.join(
+                            debug_dir, f"{safe_name}_p{page_idx}.json")
+                        with open(debug_path, "w") as _df:
+                            _json.dump(extraction, _df, indent=2)
+
+                        if extraction and extraction.get("emissions"):
+                            confidence = extraction.get("confidence_score", 0) or 0
+
+                            if confidence < CONFIDENCE_THRESHOLD:
+                                log.info(f"    Page {page_idx}: low confidence "
+                                         f"({confidence}), re-extracting with Opus")
+                                stronger = extract_emissions_from_page_image(
+                                    img_path, company_name, page_idx, client,
+                                    model=MODEL_STRONG,
+                                )
+                                if stronger and stronger.get("emissions"):
+                                    extraction = stronger
+                                    confidence = extraction.get("confidence_score", 0) or 0
+                                    debug_path_strong = os.path.join(
+                                        debug_dir, f"{safe_name}_p{page_idx}_opus.json")
+                                    with open(debug_path_strong, "w") as _df:
+                                        _json.dump(extraction, _df, indent=2)
+
+                            if confidence > best_confidence:
+                                best_confidence = confidence
+                            if extraction.get("methodology_notes"):
+                                methodology_notes = (
+                                    (methodology_notes + " " if methodology_notes else "")
+                                    + extraction["methodology_notes"]
+                                )
+
+                            for entry in extraction["emissions"]:
+                                year = entry["reporting_year"]
+                                s1 = entry.get("scope_1")
+                                s2l = entry.get("scope_2_location")
+                                s2m = entry.get("scope_2_market")
+                                s3 = entry.get("scope_3")
+                                log.info(f"    Page {page_idx}, year {year}: "
+                                         f"S1={s1} S2L={s2l} S2M={s2m} S3={s3} "
+                                         f"unit={entry.get('unit')} conf={confidence}")
+
+                            new_this_page = 0
+                            for entry in extraction["emissions"]:
+                                year = entry["reporting_year"]
+                                if year not in seen_years:
+                                    entry["_page_idx"] = page_idx
+                                    entry["_screenshot_path"] = img_path
+                                    all_entries.append(entry)
+                                    seen_years.add(year)
+                                    new_this_page += 1
+                                    if year == target_year:
+                                        target_year_table_idx = len(table_dicts)
+
+                            if new_this_page:
+                                table_dicts.append({
+                                    "markdown": "(vision extraction)",
+                                    "page_index": page_idx,
+                                    "screenshot_path": img_path,
+                                })
+                                if matched_table_idx is None:
+                                    matched_table_idx = len(table_dicts) - 1
+
+                            log.info(f"    Page {page_idx}: {new_this_page} new year(s), "
+                                     f"total so far {sorted(seen_years)}")
+                        else:
+                            log.info(f"    Page {page_idx}: no emissions data")
+                    except Exception as e:
+                        log.warning(f"    Vision extraction failed for page {page_idx}: {e}")
+
+            try:
+                os.unlink(pdf_path)
+            except OSError:
+                pass
+        except Exception as e:
+            log.warning(f"    PDF vision extraction failed: {e}")
+
+    # ── Table/text extraction for HTML sources ─────────────────────────
+    if not all_entries and source_type == "html":
+        if tables_md:
+            ranked = find_emissions_tables(tables_md, client)
+            top_tables = [r for r in ranked if r["score"] >= 30]
+            for candidate_tbl in (top_tables or [])[:10]:
                 try:
                     extraction = extract_emissions(
                         tables_md[candidate_tbl["index"]], company_name, client,
@@ -330,11 +451,7 @@ def _extract_emissions_round(
                     )
                     if extraction.get("emissions"):
                         confidence = extraction.get("confidence_score", 0) or 0
-
-                        # Re-extract with stronger model if confidence is low
                         if confidence < CONFIDENCE_THRESHOLD:
-                            log.info(f"    Table {candidate_tbl['index']}: "
-                                     f"low confidence ({confidence}), re-extracting with Opus")
                             stronger = extract_emissions(
                                 tables_md[candidate_tbl["index"]], company_name, client,
                                 model=MODEL_STRONG,
@@ -342,148 +459,37 @@ def _extract_emissions_round(
                             if stronger.get("emissions"):
                                 extraction = stronger
                                 confidence = extraction.get("confidence_score", 0) or 0
-
                         if matched_table_idx is None:
                             matched_table_idx = candidate_tbl["index"]
                             methodology_notes = extraction.get("methodology_notes", "")
-
                         if confidence > best_confidence:
                             best_confidence = confidence
-
-                        new_this_table = 0
                         for entry in extraction["emissions"]:
                             year = entry["reporting_year"]
                             if year not in seen_years:
                                 entry["_table_idx"] = candidate_tbl["index"]
                                 all_entries.append(entry)
                                 seen_years.add(year)
-                                new_this_table += 1
                                 if year == target_year:
                                     target_year_table_idx = candidate_tbl["index"]
-
-                        log.info(f"    Table {candidate_tbl['index']}: "
-                                 f"{new_this_table} new year(s), "
-                                 f"total so far {sorted(seen_years)}")
                 except Exception as e:
                     log.warning(f"    Extraction failed for table {candidate_tbl['index']}: {e}")
 
-    # PDF text pass: extract from raw page text to catch non-tabular data
-    # (e.g. "Scope 1 emissions 2023: 7.5 Mt CO2e" in running text).
-    # For the target year, text data replaces table data (charts are often
-    # misread; headline text is more reliable).
-    if source_type == "pdf":
-        try:
-            from pipeline.fallback_parser import _EMISSIONS_KEYWORDS
-            pdf_path = download_to_tempfile(url)
-            import pymupdf
-            pdf_doc = pymupdf.open(pdf_path)
-            kw_pages = []  # (page_idx, text)
-            for page_idx in range(len(pdf_doc)):
-                text = pdf_doc[page_idx].get_text()
-                if text and len(text.strip()) > 100:
-                    if any(kw in text.lower() for kw in _EMISSIONS_KEYWORDS):
-                        kw_pages.append((page_idx, text))
-            pdf_doc.close()
-
-            if kw_pages:
-                combined = "\n\n---\n\n".join(t for _, t in kw_pages[:20])
-                log.info(f"    Text pass: scanning {len(kw_pages)} emissions-related pages")
-                text_ext = extract_emissions_from_text(
-                    combined, company_name, client, model=MODEL_FAST,
-                )
-                if text_ext and text_ext.get("emissions"):
-                    txt_confidence = text_ext.get("confidence_score", 0) or 0
-                    if txt_confidence < CONFIDENCE_THRESHOLD:
-                        log.info(f"    Text pass: low confidence ({txt_confidence}), "
-                                 "re-extracting with Opus")
-                        stronger = extract_emissions_from_text(
-                            combined, company_name, client, model=MODEL_STRONG,
-                        )
-                        if stronger and stronger.get("emissions"):
-                            text_ext = stronger
-                            txt_confidence = text_ext.get("confidence_score", 0) or 0
-
-                    text_used = False
-                    for entry in text_ext["emissions"]:
-                        year = entry["reporting_year"]
-                        if year == target_year and year in seen_years:
-                            all_entries = [e for e in all_entries
-                                          if e["reporting_year"] != year]
-                            all_entries.append(entry)
-                            text_used = True
-                            log.info(f"    Text pass: replaced table data for "
-                                     f"target year {year} with text extraction")
-                        elif year not in seen_years:
-                            all_entries.append(entry)
-                            seen_years.add(year)
-                            text_used = True
-                            log.info(f"    Text pass: added year {year} from text")
-
-                    if text_used:
-                        # Screenshot the page that mentions the target year,
-                        # or fall back to the first emissions-keyword page
-                        best_page_idx = kw_pages[0][0]
-                        if target_year:
-                            for pidx, ptxt in kw_pages:
-                                if str(target_year) in ptxt:
-                                    best_page_idx = pidx
-                                    break
-                        first_page_idx = best_page_idx
-                        safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
-                        screenshots_dir = os.path.join(
-                            os.path.dirname(__file__), "..", "screenshots")
-                        os.makedirs(screenshots_dir, exist_ok=True)
-                        txt_screenshot = os.path.join(
-                            screenshots_dir,
-                            f"{safe_name}_text_p{first_page_idx}.png")
-                        try:
-                            render_pdf_page(pdf_path, first_page_idx, txt_screenshot)
-                            # Store text page in table_dicts so screenshot
-                            # capture finds the right page
-                            table_dicts.append({
-                                "markdown": "(text extraction)",
-                                "page_index": first_page_idx,
-                                "screenshot_path": txt_screenshot,
-                            })
-                            target_year_table_idx = len(table_dicts) - 1
-                            if matched_table_idx is None:
-                                matched_table_idx = target_year_table_idx
-                            log.info(f"    Text pass: screenshot saved for page "
-                                     f"{first_page_idx}")
-                        except Exception as e:
-                            log.warning(f"    Text pass: screenshot failed: {e}")
-
-                    if txt_confidence > best_confidence:
-                        best_confidence = txt_confidence
-                    if text_ext.get("methodology_notes"):
-                        methodology_notes = (methodology_notes or "") + " " + \
-                            text_ext["methodology_notes"]
-
-            # Clean up temp PDF
-            try:
-                os.unlink(pdf_path)
-            except OSError:
-                pass
-        except Exception as e:
-            log.warning(f"    PDF text extraction pass failed: {e}")
-
-    # Fallback: extract from page text (HTML sources)
-    if not all_entries and source_type == "html":
-        log.info("    No table results, trying text fallback")
-        page_text = extract_html_text(url)
-        extraction = extract_emissions_from_text(page_text, company_name, client,
-                                                  model=MODEL_FAST)
-        if extraction and extraction.get("emissions"):
-            confidence = extraction.get("confidence_score", 0) or 0
-            if confidence < CONFIDENCE_THRESHOLD:
-                log.info(f"    Low confidence ({confidence}), re-extracting with Opus")
-                stronger = extract_emissions_from_text(page_text, company_name, client,
-                                                       model=MODEL_STRONG)
-                if stronger.get("emissions"):
-                    extraction = stronger
-            all_entries = extraction["emissions"]
-            best_confidence = extraction.get("confidence_score", 0) or 0
-            methodology_notes = extraction.get("methodology_notes", "")
+        if not all_entries:
+            log.info("    No table results, trying text fallback")
+            page_text = extract_html_text(url)
+            extraction = extract_emissions_from_text(page_text, company_name, client,
+                                                      model=MODEL_FAST)
+            if extraction and extraction.get("emissions"):
+                confidence = extraction.get("confidence_score", 0) or 0
+                if confidence < CONFIDENCE_THRESHOLD:
+                    stronger = extract_emissions_from_text(page_text, company_name, client,
+                                                           model=MODEL_STRONG)
+                    if stronger.get("emissions"):
+                        extraction = stronger
+                all_entries = extraction["emissions"]
+                best_confidence = extraction.get("confidence_score", 0) or 0
+                methodology_notes = extraction.get("methodology_notes", "")
 
     if all_entries:
         # Use the table that contained the target year for the screenshot,
