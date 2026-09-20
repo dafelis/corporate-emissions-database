@@ -335,11 +335,13 @@ def _extract_emissions_round(
             pdf_doc = pymupdf.open(pdf_path)
 
             kw_page_indices = []
+            page_texts = {}
             for page_idx in range(len(pdf_doc)):
                 text = pdf_doc[page_idx].get_text()
                 if text and len(text.strip()) > 100:
                     if any(kw in text.lower() for kw in _EMISSIONS_KEYWORDS):
                         kw_page_indices.append(page_idx)
+                        page_texts[page_idx] = text
 
             if kw_page_indices:
                 log.info(f"    PDF extract: {len(kw_page_indices)} emissions-related "
@@ -401,16 +403,27 @@ def _extract_emissions_round(
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
 
-                        # Map filtered-PDF page back to original PDF page
-                        filtered_pg = entry.get("source_page", 1) - 1  # 1-indexed → 0-indexed
-                        filtered_pg = max(0, min(filtered_pg, len(filtered_pages) - 1))
-                        original_pg = filtered_pages[filtered_pg]
+                        # Find the original page by matching year in text
+                        original_pg = filtered_pages[0]  # fallback
+                        year_str = str(year)
+                        for pg_idx in filtered_pages:
+                            pg_text = page_texts.get(pg_idx, "")
+                            if year_str in pg_text and any(
+                                kw in pg_text.lower()
+                                for kw in ("scope 1", "scope 2", "scope 3",
+                                           "tco2", "tonnes co2", "mt co2",
+                                           "ktco2", "mtco2")
+                            ):
+                                original_pg = pg_idx
+                                break
 
                         if year not in seen_years:
                             img_path = os.path.join(
                                 screenshots_dir,
                                 f"{safe_name}_p{original_pg}.png")
                             render_pdf_page(pdf_path, original_pg, img_path)
+                            log.info(f"    Screenshot for {year}: "
+                                     f"original page {original_pg}")
 
                             table_dicts.append({
                                 "markdown": "(pdf extraction)",
