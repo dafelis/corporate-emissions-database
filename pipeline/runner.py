@@ -480,10 +480,7 @@ def _extract_emissions_round(
                             or entry.get("scope_2_page")
                             or 1
                         )
-                        # Claude returns 1-indexed but appears to count from
-                        # page 0 of the PDF (off by one). Use the value
-                        # directly as the 0-indexed position.
-                        pg_idx = max(0, min(best_filtered_pg,
+                        pg_idx = max(0, min(best_filtered_pg - 1,
                                            len(filtered_pages) - 1))
                         original_pg = filtered_pages[pg_idx]
                         log.info(f"    Year {year}: Claude says page "
