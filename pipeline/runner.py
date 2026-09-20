@@ -352,9 +352,15 @@ def _extract_emissions_round(
                 filtered_doc = pymupdf.open()
                 for pg in filtered_pages:
                     filtered_doc.insert_pdf(pdf_doc, from_page=pg, to_page=pg)
-                filtered_path = pdf_path + ".filtered.pdf"
+                safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
+                debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
+                os.makedirs(debug_dir, exist_ok=True)
+                filtered_path = os.path.join(debug_dir, f"{safe_name}_filtered.pdf")
                 filtered_doc.save(filtered_path)
                 filtered_doc.close()
+                log.info(f"    Filtered PDF saved: {filtered_path} "
+                         f"({len(filtered_pages)} pages, "
+                         f"original indices {filtered_pages})")
 
                 extraction = extract_emissions_from_pdf(
                     filtered_path, company_name, client, model=MODEL_FAST,
@@ -362,9 +368,6 @@ def _extract_emissions_round(
                 )
 
                 # Save debug JSON
-                safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
-                debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
-                os.makedirs(debug_dir, exist_ok=True)
                 debug_path = os.path.join(debug_dir, f"{safe_name}_pdf.json")
                 with open(debug_path, "w") as _df:
                     _json.dump(extraction, _df, indent=2)
@@ -436,10 +439,6 @@ def _extract_emissions_round(
                     log.info(f"    PDF extract: {len(seen_years)} year(s) "
                              f"found {sorted(seen_years)}")
 
-                try:
-                    os.unlink(filtered_path)
-                except OSError:
-                    pass
 
             pdf_doc.close()
             try:
