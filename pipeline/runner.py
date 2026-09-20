@@ -491,10 +491,12 @@ def _extract_emissions_round(
                         best_score, best_pg = ranked[0]
                         original_pg = best_pg
 
+                        verified = False
                         if best_score >= 7:
                             log.info(f"    Year {year}: strong text match "
                                      f"(score={best_score}) on page "
                                      f"{best_pg}, skipping verification")
+                            verified = True
                         else:
                             for _, cand_pg in ranked:
                                 try:
@@ -511,16 +513,19 @@ def _extract_emissions_round(
                                         log.info(f"    Year {year}: Claude"
                                                  f" confirmed page "
                                                  f"{cand_pg}")
+                                        verified = True
                                         break
                                     log.info(f"    Year {year}: page "
                                              f"{cand_pg} not confirmed")
                                 except Exception as ve:
                                     log.warning(f"    Year {year}: verify"
                                                 f" page {cand_pg}: {ve}")
-                            else:
-                                log.info(f"    Year {year}: no page "
-                                         f"confirmed, using best text "
-                                         f"match (page {original_pg})")
+
+                        if not verified:
+                            log.info(f"    Year {year}: no evidence page "
+                                     f"confirmed, discarding "
+                                     f"(likely not in this document)")
+                            continue
 
                         if year not in seen_years:
                             img_path = os.path.join(
