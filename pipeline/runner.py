@@ -342,10 +342,10 @@ def _rank_evidence_pages(entry, filtered_pages, page_texts, top_n=3):
             scored.append((score, pg_idx))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    pages = [pg for _, pg in scored[:top_n]]
-    if not pages:
-        pages = [filtered_pages[0]]
-    return pages
+    results = [(score, pg) for score, pg in scored[:top_n]]
+    if not results:
+        results = [(0, filtered_pages[0])]
+    return results
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -392,10 +392,14 @@ def _extract_emissions_round(
 
             kw_page_indices = []
             page_texts = {}
+            _SCOPE_KEYWORDS = ["scope 1", "scope 2", "scope 3"]
             for page_idx in range(len(pdf_doc)):
                 text = pdf_doc[page_idx].get_text()
                 if text and len(text.strip()) > 100:
-                    if any(kw in text.lower() for kw in _EMISSIONS_KEYWORDS):
+                    lower = text.lower()
+                    has_scope = any(kw in lower for kw in _SCOPE_KEYWORDS)
+                    has_emissions = any(kw in lower for kw in _EMISSIONS_KEYWORDS)
+                    if has_scope and has_emissions:
                         kw_page_indices.append(page_idx)
                         page_texts[page_idx] = text
 
@@ -404,7 +408,7 @@ def _extract_emissions_round(
                          f"pages (of {len(pdf_doc)} total)")
 
                 # Build a filtered PDF with only the relevant pages
-                filtered_pages = kw_page_indices[:30]
+                filtered_pages = kw_page_indices[:15]
                 filtered_doc = pymupdf.open()
                 for pg in filtered_pages:
                     filtered_doc.insert_pdf(pdf_doc, from_page=pg, to_page=pg)
@@ -431,9 +435,17 @@ def _extract_emissions_round(
                 if extraction and extraction.get("emissions"):
                     confidence = extraction.get("confidence_score", 0) or 0
 
-                    if confidence < CONFIDENCE_THRESHOLD:
-                        log.info(f"    PDF extract: low confidence ({confidence}), "
-                                 "re-extracting with Opus")
+                    # Only escalate to Opus when Haiku found no
+                    # usable scope values — not just low confidence
+                    has_any_values = any(
+                        e.get("scope_1") is not None
+                        or e.get("scope_2_location") is not None
+                        or e.get("scope_3") is not None
+                        for e in extraction["emissions"]
+                    )
+                    if confidence < CONFIDENCE_THRESHOLD and not has_any_values:
+                        log.info(f"    PDF extract: low confidence ({confidence})"
+                                 " and no values, re-extracting with Opus")
                         stronger = extract_emissions_from_pdf(
                             filtered_path, company_name, client, model=MODEL_STRONG,
                             num_pages=len(filtered_pages),
@@ -465,33 +477,44 @@ def _extract_emissions_round(
                                  f"unit={entry.get('unit')} conf={confidence}")
 
                         # Find the evidence page: text search narrows
-                        # to candidates, then Claude verifies each one
-                        candidate_pages = _rank_evidence_pages(
+                        # to candidates; skip Claude verification if
+                        # the text match is strong (score >= 7 means
+                        # year + multiple values + scope keywords)
+                        ranked = _rank_evidence_pages(
                             entry, filtered_pages, page_texts, top_n=3)
-                        original_pg = candidate_pages[0]
-                        for cand_pg in candidate_pages:
-                            try:
-                                confirmed = verify_page_contains_values(
-                                    pdf_path, cand_pg, year,
-                                    scope_1=s1, scope_2=s2l, scope_3=s3,
-                                    unit=entry.get("unit", "tonnes CO2e"),
-                                    client=client,
-                                )
-                                if confirmed:
-                                    original_pg = cand_pg
-                                    log.info(f"    Year {year}: Claude "
-                                             f"confirmed original page "
-                                             f"{cand_pg}")
-                                    break
-                                log.info(f"    Year {year}: page {cand_pg}"
-                                         f" not confirmed, trying next")
-                            except Exception as ve:
-                                log.warning(f"    Year {year}: verify "
-                                            f"page {cand_pg} failed: {ve}")
+                        best_score, best_pg = ranked[0]
+                        original_pg = best_pg
+
+                        if best_score >= 7:
+                            log.info(f"    Year {year}: strong text match "
+                                     f"(score={best_score}) on page "
+                                     f"{best_pg}, skipping verification")
                         else:
-                            log.info(f"    Year {year}: no page confirmed"
-                                     f", using best text match "
-                                     f"(page {original_pg})")
+                            for _, cand_pg in ranked:
+                                try:
+                                    confirmed = verify_page_contains_values(
+                                        pdf_path, cand_pg, year,
+                                        scope_1=s1, scope_2=s2l,
+                                        scope_3=s3,
+                                        unit=entry.get("unit",
+                                                        "tonnes CO2e"),
+                                        client=client,
+                                    )
+                                    if confirmed:
+                                        original_pg = cand_pg
+                                        log.info(f"    Year {year}: Claude"
+                                                 f" confirmed page "
+                                                 f"{cand_pg}")
+                                        break
+                                    log.info(f"    Year {year}: page "
+                                             f"{cand_pg} not confirmed")
+                                except Exception as ve:
+                                    log.warning(f"    Year {year}: verify"
+                                                f" page {cand_pg}: {ve}")
+                            else:
+                                log.info(f"    Year {year}: no page "
+                                         f"confirmed, using best text "
+                                         f"match (page {original_pg})")
 
                         if year not in seen_years:
                             img_path = os.path.join(
