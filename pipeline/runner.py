@@ -1138,7 +1138,7 @@ def process_company(
         walk_year = TARGET_END_YEAR
         while walk_year >= TARGET_START_YEAR and search_count < MAX_SEARCHES:
             # Skip years that existed before this run OR were explicitly searched
-            if walk_year in em_pre_existing or walk_year in em_searched_years:
+            if walk_year in em_covered or walk_year in em_searched_years:
                 log.info(f"  Year {walk_year}: already covered, skipping")
                 walk_year -= 1
                 continue

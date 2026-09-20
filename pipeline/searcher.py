@@ -113,7 +113,7 @@ def search_for_emissions_source(
     if target_year:
         query = (
             f"{company_name} greenhouse gas emissions scope 1 2 3 "
-            f"{target_year} sustainability report ESG annual report"
+            f"{target_year} {target_year + 1} sustainability report ESG annual report"
         )
         year_hint = f" for the year {target_year} (or covering {target_year})"
     else:
