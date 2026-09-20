@@ -282,13 +282,12 @@ def extract_emissions_from_pdf(
         pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
     page_instruction = (
-        f"PAGE TRACKING: This document has exactly {num_pages} pages. "
-        f"Pages are numbered by their POSITION in this document: 1 is the first page, "
-        f"2 is the second, up to {num_pages}. Ignore any page numbers printed on the "
-        "pages themselves — those are from the original report and do not match. "
-        "For each scope value you extract, report which page (by position) you read "
-        "it from in scope_1_page, scope_2_page, and scope_3_page. Scope 1 and Scope 3 "
-        "may be on different pages — report each one individually. "
+        "PAGE TRACKING: Each page of this document has a red stamp in the top-right "
+        "corner reading [PAGE X OF Y]. For each scope value you extract, read the "
+        "stamp on the page where you found that value and report X as scope_1_page, "
+        "scope_2_page, or scope_3_page. Scope 1, 2, and 3 may be on different pages "
+        "— report each one individually from its stamp. Ignore any other page numbers "
+        "printed on the pages (those are from the original report). "
         "If a scope value is null, set its page to null too. "
         if num_pages > 0 else ""
     )

@@ -411,11 +411,27 @@ def _extract_emissions_round(
                 log.info(f"    PDF extract: {len(kw_page_indices)} emissions-related "
                          f"pages (of {len(pdf_doc)} total)")
 
-                # Build a filtered PDF with only the relevant pages
+                # Build a filtered PDF with only the relevant pages,
+                # stamping each page with its position number so Claude
+                # can read it directly instead of counting pages
                 filtered_pages = kw_page_indices[:30]
+                total_fp = len(filtered_pages)
                 filtered_doc = pymupdf.open()
                 for pg in filtered_pages:
                     filtered_doc.insert_pdf(pdf_doc, from_page=pg, to_page=pg)
+                for i in range(total_fp):
+                    page = filtered_doc[i]
+                    label = f"[PAGE {i + 1} OF {total_fp}]"
+                    rect = page.rect
+                    fontsize = 10
+                    text_width = len(label) * fontsize * 0.5
+                    x = rect.width - text_width - 15
+                    y = 20
+                    page.insert_text(
+                        (x, y), label,
+                        fontsize=fontsize,
+                        color=(1, 0, 0),
+                    )
                 safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
                 debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
                 os.makedirs(debug_dir, exist_ok=True)
@@ -472,8 +488,8 @@ def _extract_emissions_round(
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
 
-                        # Use Claude's per-scope page numbers to find
-                        # the best evidence page in the original PDF
+                        # Map Claude's reported page (from the stamp
+                        # it read on the filtered PDF) to the original
                         best_filtered_pg = (
                             entry.get("scope_1_page")
                             or entry.get("scope_3_page")
@@ -483,9 +499,9 @@ def _extract_emissions_round(
                         pg_idx = max(0, min(best_filtered_pg - 1,
                                            len(filtered_pages) - 1))
                         original_pg = filtered_pages[pg_idx]
-                        log.info(f"    Year {year}: Claude says page "
-                                 f"{best_filtered_pg} of filtered PDF → "
-                                 f"original page {original_pg}")
+                        log.info(f"    Year {year}: stamp page "
+                                 f"{best_filtered_pg} → original page "
+                                 f"{original_pg}")
 
                         if year not in seen_years:
                             img_path = os.path.join(
