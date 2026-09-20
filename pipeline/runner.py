@@ -27,7 +27,7 @@ from pipeline.parser import (
 from pipeline.fallback_parser import parse_with_fallbacks
 from pipeline.extractor import (
     find_emissions_tables, extract_emissions, extract_emissions_from_text,
-    extract_emissions_from_pdf, extract_emissions_from_page_images,
+    extract_emissions_from_pdf, verify_page_contains_values,
 )
 from pipeline.financial_extractor import find_financial_tables, extract_financials, normalise_to_units
 from pipeline.market_data import get_equity_value_at_date, get_industry_info
@@ -292,29 +292,24 @@ def _source_quality(title):
     return 50
 
 
-def _find_best_evidence_page(entry, filtered_pages, page_texts):
-    """Find the original PDF page that best matches an extracted emissions entry.
+def _rank_evidence_pages(entry, filtered_pages, page_texts, top_n=3):
+    """Rank filtered pages by likelihood of containing an extracted entry's values.
 
-    Searches page texts for the actual numeric values Claude extracted,
-    rather than relying on Claude's reported source_page.
+    Returns the top_n original page indices, best first. Used to narrow
+    candidates before sending individual pages to Claude for verification.
     """
-    import re
 
     def _format_variants(value):
         if value is None or value == 0:
             return []
         variants = []
-        # Try the raw number and common representations
         if isinstance(value, float):
-            # e.g. 6.7 → ["6.7", "6,7"]
             variants.append(str(value))
             variants.append(str(value).replace(".", ","))
-            # If it's a whole number stored as float, add int form
             if value == int(value):
                 variants.append(str(int(value)))
         elif isinstance(value, int):
             variants.append(str(value))
-            # Add comma-separated thousands: 11600000 → "11,600,000"
             variants.append(f"{value:,}")
         return variants
 
@@ -323,37 +318,34 @@ def _find_best_evidence_page(entry, filtered_pages, page_texts):
     s3 = entry.get("scope_3")
     year = entry.get("reporting_year")
 
-    # Build search terms from the extracted values
     search_values = []
     for val in (s1, s2l, s3):
         search_values.extend(_format_variants(val))
 
-    best_page = filtered_pages[0]
-    best_score = 0
-
+    scored = []
     for pg_idx in filtered_pages:
         text = page_texts.get(pg_idx, "")
         if not text:
             continue
         score = 0
-        # Year must appear on the page
         if str(year) not in text:
             continue
         score += 1
-        # Count how many extracted values appear on this page
         for val_str in search_values:
             if val_str in text:
                 score += 2
-        # Bonus for scope keywords alongside values
         text_lower = text.lower()
         for kw in ("scope 1", "scope 2", "scope 3"):
             if kw in text_lower:
                 score += 1
-        if score > best_score:
-            best_score = score
-            best_page = pg_idx
+        if score > 0:
+            scored.append((score, pg_idx))
 
-    return best_page
+    scored.sort(key=lambda x: x[0], reverse=True)
+    pages = [pg for _, pg in scored[:top_n]]
+    if not pages:
+        pages = [filtered_pages[0]]
+    return pages
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -411,45 +403,25 @@ def _extract_emissions_round(
                 log.info(f"    PDF extract: {len(kw_page_indices)} emissions-related "
                          f"pages (of {len(pdf_doc)} total)")
 
-                # Render each filtered page as a separate PNG image
-                # so Claude sees distinct pages with clear boundaries
+                # Build a filtered PDF with only the relevant pages
                 filtered_pages = kw_page_indices[:30]
-                safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
-                debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
-                os.makedirs(debug_dir, exist_ok=True)
-
-                page_images = []
-                for pg in filtered_pages:
-                    pix = pdf_doc[pg].get_pixmap(dpi=100)
-                    page_images.append(pix.tobytes("png"))
-                total_img_size = sum(len(img) for img in page_images)
-                log.info(f"    Rendered {len(page_images)} pages as images "
-                         f"({total_img_size / 1_000_000:.1f} MB total)")
-
-                # Also save filtered PDF for debug inspection
                 filtered_doc = pymupdf.open()
                 for pg in filtered_pages:
                     filtered_doc.insert_pdf(pdf_doc, from_page=pg, to_page=pg)
+                safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
+                debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
+                os.makedirs(debug_dir, exist_ok=True)
                 filtered_path = os.path.join(debug_dir, f"{safe_name}_filtered.pdf")
                 filtered_doc.save(filtered_path)
                 filtered_doc.close()
+                log.info(f"    Filtered PDF saved: {filtered_path} "
+                         f"({len(filtered_pages)} pages, "
+                         f"original indices {filtered_pages})")
 
-                # Try image-based extraction first (accurate page tracking),
-                # fall back to PDF document approach if payload too large
-                extraction = None
-                used_images = True
-                try:
-                    extraction = extract_emissions_from_page_images(
-                        page_images, company_name, client, model=MODEL_FAST,
-                    )
-                except Exception as img_err:
-                    log.warning(f"    Image extraction failed ({img_err}), "
-                                "falling back to PDF document")
-                    used_images = False
-                    extraction = extract_emissions_from_pdf(
-                        filtered_path, company_name, client, model=MODEL_FAST,
-                        num_pages=len(filtered_pages),
-                    )
+                extraction = extract_emissions_from_pdf(
+                    filtered_path, company_name, client, model=MODEL_FAST,
+                    num_pages=len(filtered_pages),
+                )
 
                 # Save debug JSON
                 debug_path = os.path.join(debug_dir, f"{safe_name}_pdf.json")
@@ -460,19 +432,12 @@ def _extract_emissions_round(
                     confidence = extraction.get("confidence_score", 0) or 0
 
                     if confidence < CONFIDENCE_THRESHOLD:
-                        log.info(f"    Extract: low confidence ({confidence}), "
+                        log.info(f"    PDF extract: low confidence ({confidence}), "
                                  "re-extracting with Opus")
-                        if used_images:
-                            stronger = extract_emissions_from_page_images(
-                                page_images, company_name, client,
-                                model=MODEL_STRONG,
-                            )
-                        else:
-                            stronger = extract_emissions_from_pdf(
-                                filtered_path, company_name, client,
-                                model=MODEL_STRONG,
-                                num_pages=len(filtered_pages),
-                            )
+                        stronger = extract_emissions_from_pdf(
+                            filtered_path, company_name, client, model=MODEL_STRONG,
+                            num_pages=len(filtered_pages),
+                        )
                         if stronger and stronger.get("emissions"):
                             extraction = stronger
                             confidence = extraction.get("confidence_score", 0) or 0
@@ -499,31 +464,34 @@ def _extract_emissions_round(
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
 
-                        # Map Claude's reported page to the original PDF
-                        best_filtered_pg = (
-                            entry.get("scope_1_page")
-                            or entry.get("scope_3_page")
-                            or entry.get("scope_2_page")
-                            or 1
-                        )
-                        if used_images or best_filtered_pg <= len(filtered_pages):
-                            # Position in filtered PDF / image set → map
-                            pg_idx = max(0, min(best_filtered_pg - 1,
-                                               len(filtered_pages) - 1))
-                            original_pg = filtered_pages[pg_idx]
-                            log.info(f"    Year {year}: filtered page "
-                                     f"{best_filtered_pg} → original "
-                                     f"page {original_pg}")
+                        # Find the evidence page: text search narrows
+                        # to candidates, then Claude verifies each one
+                        candidate_pages = _rank_evidence_pages(
+                            entry, filtered_pages, page_texts, top_n=3)
+                        original_pg = candidate_pages[0]
+                        for cand_pg in candidate_pages:
+                            try:
+                                confirmed = verify_page_contains_values(
+                                    pdf_path, cand_pg, year,
+                                    scope_1=s1, scope_2=s2l, scope_3=s3,
+                                    unit=entry.get("unit", "tonnes CO2e"),
+                                    client=client,
+                                )
+                                if confirmed:
+                                    original_pg = cand_pg
+                                    log.info(f"    Year {year}: Claude "
+                                             f"confirmed original page "
+                                             f"{cand_pg}")
+                                    break
+                                log.info(f"    Year {year}: page {cand_pg}"
+                                         f" not confirmed, trying next")
+                            except Exception as ve:
+                                log.warning(f"    Year {year}: verify "
+                                            f"page {cand_pg} failed: {ve}")
                         else:
-                            # Claude returned original page number
-                            # (happens with PDF fallback — no stamps)
-                            orig_idx = best_filtered_pg - 1  # 1-indexed → 0-indexed
-                            if orig_idx in filtered_pages:
-                                original_pg = orig_idx
-                            else:
-                                original_pg = min(orig_idx, len(pdf_doc) - 1)
-                            log.info(f"    Year {year}: original page "
-                                     f"{best_filtered_pg} (direct)")
+                            log.info(f"    Year {year}: no page confirmed"
+                                     f", using best text match "
+                                     f"(page {original_pg})")
 
                         if year not in seen_years:
                             img_path = os.path.join(
