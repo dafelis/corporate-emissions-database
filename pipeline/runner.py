@@ -292,6 +292,70 @@ def _source_quality(title):
     return 50
 
 
+def _find_best_evidence_page(entry, filtered_pages, page_texts):
+    """Find the original PDF page that best matches an extracted emissions entry.
+
+    Searches page texts for the actual numeric values Claude extracted,
+    rather than relying on Claude's reported source_page.
+    """
+    import re
+
+    def _format_variants(value):
+        if value is None or value == 0:
+            return []
+        variants = []
+        # Try the raw number and common representations
+        if isinstance(value, float):
+            # e.g. 6.7 → ["6.7", "6,7"]
+            variants.append(str(value))
+            variants.append(str(value).replace(".", ","))
+            # If it's a whole number stored as float, add int form
+            if value == int(value):
+                variants.append(str(int(value)))
+        elif isinstance(value, int):
+            variants.append(str(value))
+            # Add comma-separated thousands: 11600000 → "11,600,000"
+            variants.append(f"{value:,}")
+        return variants
+
+    s1 = entry.get("scope_1")
+    s2l = entry.get("scope_2_location")
+    s3 = entry.get("scope_3")
+    year = entry.get("reporting_year")
+
+    # Build search terms from the extracted values
+    search_values = []
+    for val in (s1, s2l, s3):
+        search_values.extend(_format_variants(val))
+
+    best_page = filtered_pages[0]
+    best_score = 0
+
+    for pg_idx in filtered_pages:
+        text = page_texts.get(pg_idx, "")
+        if not text:
+            continue
+        score = 0
+        # Year must appear on the page
+        if str(year) not in text:
+            continue
+        score += 1
+        # Count how many extracted values appear on this page
+        for val_str in search_values:
+            if val_str in text:
+                score += 2
+        # Bonus for scope keywords alongside values
+        text_lower = text.lower()
+        for kw in ("scope 1", "scope 2", "scope 3"):
+            if kw in text_lower:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_page = pg_idx
+
+    return best_page
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Emissions extraction (iterative)
 # ══════════════════════════════════════════════════════════════════════════
@@ -408,11 +472,10 @@ def _extract_emissions_round(
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
 
-                        # Map source_page (1-indexed position in filtered PDF)
-                        # back to page index in the original full PDF
-                        src_pg = entry.get("source_page", 1) - 1
-                        src_pg = max(0, min(src_pg, len(filtered_pages) - 1))
-                        original_pg = filtered_pages[src_pg]
+                        # Find the best screenshot page by searching for
+                        # the actual extracted values in the page text
+                        original_pg = _find_best_evidence_page(
+                            entry, filtered_pages, page_texts)
 
                         if year not in seen_years:
                             img_path = os.path.join(
