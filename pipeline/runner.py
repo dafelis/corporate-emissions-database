@@ -420,10 +420,11 @@ def _extract_emissions_round(
 
                 page_images = []
                 for pg in filtered_pages:
-                    pix = pdf_doc[pg].get_pixmap(dpi=150)
+                    pix = pdf_doc[pg].get_pixmap(dpi=100)
                     page_images.append(pix.tobytes("png"))
+                total_img_size = sum(len(img) for img in page_images)
                 log.info(f"    Rendered {len(page_images)} pages as images "
-                         f"for vision extraction")
+                         f"({total_img_size / 1_000_000:.1f} MB total)")
 
                 # Also save filtered PDF for debug inspection
                 filtered_doc = pymupdf.open()
@@ -433,9 +434,22 @@ def _extract_emissions_round(
                 filtered_doc.save(filtered_path)
                 filtered_doc.close()
 
-                extraction = extract_emissions_from_page_images(
-                    page_images, company_name, client, model=MODEL_FAST,
-                )
+                # Try image-based extraction first (accurate page tracking),
+                # fall back to PDF document approach if payload too large
+                extraction = None
+                used_images = True
+                try:
+                    extraction = extract_emissions_from_page_images(
+                        page_images, company_name, client, model=MODEL_FAST,
+                    )
+                except Exception as img_err:
+                    log.warning(f"    Image extraction failed ({img_err}), "
+                                "falling back to PDF document")
+                    used_images = False
+                    extraction = extract_emissions_from_pdf(
+                        filtered_path, company_name, client, model=MODEL_FAST,
+                        num_pages=len(filtered_pages),
+                    )
 
                 # Save debug JSON
                 debug_path = os.path.join(debug_dir, f"{safe_name}_pdf.json")
@@ -446,11 +460,19 @@ def _extract_emissions_round(
                     confidence = extraction.get("confidence_score", 0) or 0
 
                     if confidence < CONFIDENCE_THRESHOLD:
-                        log.info(f"    Image extract: low confidence ({confidence}), "
+                        log.info(f"    Extract: low confidence ({confidence}), "
                                  "re-extracting with Opus")
-                        stronger = extract_emissions_from_page_images(
-                            page_images, company_name, client, model=MODEL_STRONG,
-                        )
+                        if used_images:
+                            stronger = extract_emissions_from_page_images(
+                                page_images, company_name, client,
+                                model=MODEL_STRONG,
+                            )
+                        else:
+                            stronger = extract_emissions_from_pdf(
+                                filtered_path, company_name, client,
+                                model=MODEL_STRONG,
+                                num_pages=len(filtered_pages),
+                            )
                         if stronger and stronger.get("emissions"):
                             extraction = stronger
                             confidence = extraction.get("confidence_score", 0) or 0
@@ -488,7 +510,8 @@ def _extract_emissions_round(
                         pg_idx = max(0, min(best_filtered_pg - 1,
                                            len(filtered_pages) - 1))
                         original_pg = filtered_pages[pg_idx]
-                        log.info(f"    Year {year}: image page "
+                        method = "image" if used_images else "PDF"
+                        log.info(f"    Year {year}: {method} page "
                                  f"{best_filtered_pg} → original page "
                                  f"{original_pg}")
 
