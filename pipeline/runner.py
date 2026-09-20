@@ -472,6 +472,12 @@ def _extract_emissions_round(
                         s2l = entry.get("scope_2_location")
                         s2m = entry.get("scope_2_market")
                         s3 = entry.get("scope_3")
+
+                        if s1 is None and s2l is None and s2m is None and s3 is None:
+                            log.info(f"    Year {year}: all scopes null, "
+                                     f"skipping (not real data)")
+                            continue
+
                         log.info(f"    Year {year}: S1={s1} S2L={s2l} "
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
@@ -624,6 +630,13 @@ def _extract_emissions_round(
         for entry in all_entries:
             year = entry["reporting_year"]
             if year < TARGET_START_YEAR:
+                continue
+
+            # Skip entries with no actual scope values
+            if (entry.get("scope_1") is None
+                    and entry.get("scope_2_location") is None
+                    and entry.get("scope_2_market") is None
+                    and entry.get("scope_3") is None):
                 continue
 
             # Is this the year we explicitly searched for?
