@@ -219,3 +219,124 @@ def extract_emissions_from_text(
     if text_out is None:
         raise ValueError("Claude returned no text response.")
     return json.loads(text_out)
+
+
+# Schema variant that also asks Claude which page the data came from
+_PDF_EMISSIONS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "emissions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "reporting_year": {"type": "integer"},
+                    "period_start": {"type": "string", "description": "Start of reporting period in YYYY-MM-DD format. Null if not stated."},
+                    "period_end": {"type": "string", "description": "End of reporting period in YYYY-MM-DD format. Null if not stated."},
+                    "scope_1": {"type": "number", "description": "Scope 1 emissions value, or null if not found"},
+                    "scope_2_location": {"type": "number", "description": "Scope 2 location-based value, or null"},
+                    "scope_2_market": {"type": "number", "description": "Scope 2 market-based value, or null"},
+                    "scope_3": {"type": "number", "description": "Scope 3 total value, or null"},
+                    "scope_3_categories": {"type": "string", "description": "Which Scope 3 categories are included, if stated"},
+                    "unit": {"type": "string", "description": "Unit of measurement, e.g. 'tonnes CO2e', 'kt CO2e', 'Mt CO2e'"},
+                    "boundary": {"type": "string", "description": "Reporting boundary: 'operational control', 'equity share', or 'financial control', if stated"},
+                    "source_page": {"type": "integer", "description": "The page number (1-indexed) in the provided document where this data was found"},
+                },
+                "required": ["reporting_year", "source_page"],
+                "additionalProperties": False,
+            },
+            "description": "One entry per reporting year found in the document.",
+        },
+        "methodology_notes": {
+            "type": "string",
+            "description": "Any methodological notes, restatements, or caveats mentioned alongside the emissions data. Empty string if none.",
+        },
+        "confidence_score": {
+            "type": "integer",
+            "description": "How confident you are that the extracted values are correct, 0-100.",
+        },
+    },
+    "required": ["emissions", "methodology_notes", "confidence_score"],
+    "additionalProperties": False,
+}
+
+
+def extract_emissions_from_pdf(
+    pdf_path: str,
+    company_name: str,
+    client: anthropic.Anthropic,
+    model: str = "claude-haiku-4-5-20251001",
+) -> dict:
+    """Extract emissions data by sending a PDF directly to Claude.
+
+    The PDF should be pre-filtered to contain only emissions-relevant pages.
+    Claude reads the document with full spatial layout preserved and reports
+    which page each data point came from.
+    """
+    import base64
+
+    with open(pdf_path, "rb") as f:
+        pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=8192,
+        system=(
+            "You are an expert at extracting greenhouse gas emissions data from "
+            "sustainability reports. You are given a PDF document (or a subset of pages "
+            "from a larger report). "
+            "Extract Scope 1, Scope 2 (both location-based and market-based if available), "
+            "and Scope 3 emissions for EVERY year present in the document — including "
+            "prior-year comparison columns and historical trend data. "
+            "Normalise all values to the same unit (prefer tonnes CO2e). "
+            "If the document uses kt or Mt, convert to tonnes. "
+            "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
+            "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
+            "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
+            "per employee), or index values. If a cell contains '50%' or "
+            "'50% reduction', that is NOT an emissions value of 50. "
+            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+            "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
+            "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
+            "If not stated, set both to null. "
+            "For each year of data, report the page number (1-indexed) in the provided "
+            "document where you found the primary emissions values. "
+            "If a scope is not present, set its value to null. "
+            "If the document does not contain any emissions data, return an empty "
+            "emissions array. "
+            "Be precise — read the exact numbers from the document."
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Extract all greenhouse gas emissions data for {company_name} "
+                            f"from this document."
+                        ),
+                    },
+                ],
+            }
+        ],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": _PDF_EMISSIONS_SCHEMA,
+            }
+        },
+    )
+
+    text_out = next((b.text for b in response.content if b.type == "text"), None)
+    if text_out is None:
+        raise ValueError("Claude returned no text response.")
+    return json.loads(text_out)
