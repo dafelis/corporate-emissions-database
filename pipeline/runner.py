@@ -358,6 +358,7 @@ def _extract_emissions_round(
 
                 extraction = extract_emissions_from_pdf(
                     filtered_path, company_name, client, model=MODEL_FAST,
+                    num_pages=len(filtered_pages),
                 )
 
                 # Save debug JSON
@@ -376,6 +377,7 @@ def _extract_emissions_round(
                                  "re-extracting with Opus")
                         stronger = extract_emissions_from_pdf(
                             filtered_path, company_name, client, model=MODEL_STRONG,
+                            num_pages=len(filtered_pages),
                         )
                         if stronger and stronger.get("emissions"):
                             extraction = stronger
@@ -403,19 +405,11 @@ def _extract_emissions_round(
                                  f"S2M={s2m} S3={s3} "
                                  f"unit={entry.get('unit')} conf={confidence}")
 
-                        # Find the original page by matching year in text
-                        original_pg = filtered_pages[0]  # fallback
-                        year_str = str(year)
-                        for pg_idx in filtered_pages:
-                            pg_text = page_texts.get(pg_idx, "")
-                            if year_str in pg_text and any(
-                                kw in pg_text.lower()
-                                for kw in ("scope 1", "scope 2", "scope 3",
-                                           "tco2", "tonnes co2", "mt co2",
-                                           "ktco2", "mtco2")
-                            ):
-                                original_pg = pg_idx
-                                break
+                        # Map source_page (1-indexed position in filtered PDF)
+                        # back to page index in the original full PDF
+                        src_pg = entry.get("source_page", 1) - 1
+                        src_pg = max(0, min(src_pg, len(filtered_pages) - 1))
+                        original_pg = filtered_pages[src_pg]
 
                         if year not in seen_years:
                             img_path = os.path.join(

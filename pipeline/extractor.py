@@ -266,17 +266,30 @@ def extract_emissions_from_pdf(
     company_name: str,
     client: anthropic.Anthropic,
     model: str = "claude-haiku-4-5-20251001",
+    num_pages: int = 0,
 ) -> dict:
     """Extract emissions data by sending a PDF directly to Claude.
 
     The PDF should be pre-filtered to contain only emissions-relevant pages.
     Claude reads the document with full spatial layout preserved and reports
-    which page each data point came from.
+    which page each data point came from (position in this document, not
+    any page number printed on the pages).
     """
     import base64
 
     with open(pdf_path, "rb") as f:
         pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+    page_instruction = (
+        f"IMPORTANT: This document has {num_pages} pages, numbered 1 to {num_pages}. "
+        "For source_page, report the POSITION of the page within THIS document "
+        "(1 for the first page, 2 for the second, etc.) — NOT any page number "
+        "printed on the page itself. "
+        if num_pages > 0 else
+        "For source_page, report the position of the page within this document "
+        "(1 for the first page, 2 for the second, etc.) — NOT any page number "
+        "printed on the page itself. "
+    )
 
     response = client.messages.create(
         model=model,
@@ -299,8 +312,7 @@ def extract_emissions_from_pdf(
             "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
             "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
             "If not stated, set both to null. "
-            "For each year of data, report the page number (1-indexed) in the provided "
-            "document where you found the primary emissions values. "
+            + page_instruction +
             "If a scope is not present, set its value to null. "
             "If the document does not contain any emissions data, return an empty "
             "emissions array. "
