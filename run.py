@@ -106,6 +106,35 @@ def cmd_init(args):
         # Financial table — reporting period
         ("financial_records", "period_start", "DATE"),
         ("financial_records", "period_end", "DATE"),
+        # Financial table — PCAF EVIC fields
+        ("financial_records", "units", "VARCHAR(20)"),
+        ("financial_records", "gross_debt", "DOUBLE PRECISION"),
+        ("financial_records", "gross_debt_components", "TEXT"),
+        ("financial_records", "gross_debt_ref", "TEXT"),
+        ("financial_records", "gross_debt_confidence", "VARCHAR(10)"),
+        ("financial_records", "lease_liabilities", "DOUBLE PRECISION"),
+        ("financial_records", "lease_liabilities_ref", "TEXT"),
+        ("financial_records", "lease_liabilities_confidence", "VARCHAR(10)"),
+        ("financial_records", "non_controlling_interests", "DOUBLE PRECISION"),
+        ("financial_records", "nci_ref", "TEXT"),
+        ("financial_records", "nci_confidence", "VARCHAR(10)"),
+        ("financial_records", "preference_shares", "DOUBLE PRECISION"),
+        ("financial_records", "preference_shares_classification", "VARCHAR(20)"),
+        ("financial_records", "preference_shares_listed", "BOOLEAN"),
+        ("financial_records", "preference_shares_ref", "TEXT"),
+        ("financial_records", "shares_outstanding_share_class", "VARCHAR(100)"),
+        ("financial_records", "shares_outstanding_ref", "TEXT"),
+        ("financial_records", "shares_outstanding_confidence", "VARCHAR(10)"),
+        ("financial_records", "revenue_label", "VARCHAR(200)"),
+        ("financial_records", "revenue_ref", "TEXT"),
+        ("financial_records", "revenue_confidence", "VARCHAR(10)"),
+        ("financial_records", "is_financial_institution", "BOOLEAN"),
+        ("financial_records", "evic", "DOUBLE PRECISION"),
+        ("financial_records", "source_tier", "INTEGER"),
+        ("financial_records", "source_type", "VARCHAR(50)"),
+        ("financial_records", "methodology_notes", "TEXT"),
+        ("financial_records", "validation_flags", "TEXT"),
+        ("financial_records", "extraction_notes", "TEXT"),
         # Sources table — preview fields
         ("sources", "screenshot_path", "TEXT"),
         ("sources", "html_snippet", "TEXT"),
@@ -200,6 +229,10 @@ def cmd_extract(args):
 
     company_ids = [args.id] if args.id else None
 
+    # If neither --emissions nor --financial given, run both
+    skip_emissions = args.financial and not args.emissions
+    skip_financial = args.emissions and not args.financial
+
     run = run_pipeline(
         database_url=config["DATABASE_URL"],
         anthropic_key=config["ANTHROPIC_API_KEY"],
@@ -207,6 +240,8 @@ def cmd_extract(args):
         llama_key=config["LLAMA_CLOUD_API_KEY"],
         company_ids=company_ids,
         delay_between=args.delay,
+        skip_emissions=skip_emissions,
+        skip_financial=skip_financial,
     )
 
     print(f"\nPipeline run complete:")
@@ -258,9 +293,16 @@ def cmd_status(args):
 
 
 def cmd_reset(args):
-    """Delete emissions data for a company (so it can be re-extracted)."""
+    """Delete data for a company (so it can be re-extracted).
+
+    With no category flags, resets everything. With one or more of
+    --emissions, --financial, --industry, resets only those categories.
+    Orphaned sources (no longer referenced by any record) are cleaned up
+    automatically.
+    """
     config = get_config()
 
+    from sqlalchemy import and_
     from db.models import get_session, Company, EmissionsRecord, FinancialRecord, Source
 
     session = get_session(config["DATABASE_URL"])
@@ -277,17 +319,55 @@ def cmd_reset(args):
         print("Specify --id <company_id> or --all")
         sys.exit(1)
 
+    # If no category flags given, reset everything (backwards compatible)
+    reset_all = not (args.emissions or args.financial or args.industry)
+
     for company in companies:
-        n_fin = session.query(FinancialRecord).filter_by(company_id=company.id).delete()
-        n_records = session.query(EmissionsRecord).filter_by(company_id=company.id).delete()
-        n_sources = session.query(Source).filter_by(company_id=company.id).delete()
-        # Reset industry classification if requested
-        company.yfinance_sector = None
-        company.yfinance_industry = None
-        company.sic_code = None
-        company.naics_code = None
-        company.nace_code = None
-        print(f"  {company.name}: deleted {n_records} emissions, {n_fin} financial, {n_sources} sources")
+        parts = []
+
+        if reset_all or args.emissions:
+            n = session.query(EmissionsRecord).filter_by(company_id=company.id).delete()
+            parts.append(f"{n} emissions")
+
+        if reset_all or args.financial:
+            n = session.query(FinancialRecord).filter_by(company_id=company.id).delete()
+            parts.append(f"{n} financial")
+
+        if reset_all or args.industry:
+            company.yfinance_sector = None
+            company.yfinance_industry = None
+            company.sic_code = None
+            company.naics_code = None
+            company.nace_code = None
+            parts.append("industry")
+
+        # Clean up orphaned sources for this company
+        referenced_by_emissions = (
+            session.query(EmissionsRecord.source_id)
+            .filter(EmissionsRecord.company_id == company.id,
+                    EmissionsRecord.source_id.isnot(None))
+        )
+        referenced_by_financial = (
+            session.query(FinancialRecord.source_id)
+            .filter(FinancialRecord.company_id == company.id,
+                    FinancialRecord.source_id.isnot(None))
+        )
+        referenced_ids = {r[0] for r in referenced_by_emissions} | {r[0] for r in referenced_by_financial}
+
+        orphaned = (
+            session.query(Source)
+            .filter(
+                Source.company_id == company.id,
+                ~Source.id.in_(referenced_ids) if referenced_ids else Source.id.isnot(None),
+            )
+            .all()
+        )
+        if orphaned:
+            for s in orphaned:
+                session.delete(s)
+            parts.append(f"{len(orphaned)} orphaned sources")
+
+        print(f"  {company.name}: deleted {', '.join(parts)}")
 
     session.commit()
     print("Reset complete")
@@ -306,6 +386,10 @@ def main():
     extract_parser.add_argument("--id", type=int, help="Process a single company by ID")
     extract_parser.add_argument("--delay", type=float, default=2.0,
                                 help="Seconds between companies (rate limiting)")
+    extract_parser.add_argument("--emissions", action="store_true",
+                                help="Extract emissions data only")
+    extract_parser.add_argument("--financial", action="store_true",
+                                help="Extract financial data only")
 
     # check
     subparsers.add_parser("check", help="Run sanity checks")
@@ -314,9 +398,12 @@ def main():
     subparsers.add_parser("status", help="Show database status")
 
     # reset
-    reset_parser = subparsers.add_parser("reset", help="Delete emissions data for re-extraction")
+    reset_parser = subparsers.add_parser("reset", help="Delete data for re-extraction")
     reset_parser.add_argument("--id", type=int, help="Reset a single company by ID")
     reset_parser.add_argument("--all", action="store_true", help="Reset all companies")
+    reset_parser.add_argument("--emissions", action="store_true", help="Delete emissions data only")
+    reset_parser.add_argument("--financial", action="store_true", help="Delete financial data only")
+    reset_parser.add_argument("--industry", action="store_true", help="Reset industry classification")
 
     args = parser.parse_args()
 

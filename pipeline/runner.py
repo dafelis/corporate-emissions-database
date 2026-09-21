@@ -7,6 +7,7 @@ each missing year in turn. Bonus years found during a search are kept,
 so earlier years get skipped if already covered.
 """
 
+import json
 import logging
 import os
 import time
@@ -30,6 +31,7 @@ from pipeline.extractor import (
     extract_emissions_from_pdf, verify_page_contains_values,
 )
 from pipeline.financial_extractor import find_financial_tables, extract_financials, normalise_to_units
+from pipeline.financial_validator import validate_financial_entry, compute_evic
 from pipeline.market_data import get_equity_value_at_date, get_industry_info
 from pipeline.industry_classifier import classify_company
 from pipeline.storage import upload_file
@@ -185,7 +187,7 @@ def _get_financial_needs(session, company_id, target_years):
     covered = {r[0] for r in covered_rows}
     no_record = target_years - covered
 
-    # Years where the record exists but key fields are still null
+    # Years where the record exists but PCAF-required fields are still null
     incomplete_rows = (
         session.query(FinancialRecord.reporting_year)
         .filter(
@@ -193,8 +195,7 @@ def _get_financial_needs(session, company_id, target_years):
             FinancialRecord.reporting_year.in_(list(target_years)),
             or_(
                 FinancialRecord.revenue.is_(None),
-                FinancialRecord.outstanding_debt.is_(None),
-                FinancialRecord.cash_and_equivalents.is_(None),
+                FinancialRecord.gross_debt.is_(None),
             ),
         )
         .all()
@@ -789,6 +790,7 @@ def _extract_financials_from_document(
     entries_by_year = {}  # year -> merged entry dict
     matched_table_idx = None
     best_confidence = 0
+    fin_extraction_notes = ""
 
     for candidate_tbl in top[:10]:
         try:
@@ -816,6 +818,9 @@ def _extract_financials_from_document(
 
                 if confidence > best_confidence:
                     best_confidence = confidence
+                    notes = fin_extraction.get("methodology_notes", "")
+                    if notes:
+                        fin_extraction_notes = notes
 
                 new_this_table = 0
                 for entry in fin_extraction["financials"]:
@@ -867,15 +872,46 @@ def _extract_financials_from_document(
             continue
 
         multiplier = entry.get("unit_multiplier", 1) or 1
-        new_revenue = normalise_to_units(entry.get("revenue"), multiplier)
-        new_debt = normalise_to_units(entry.get("outstanding_debt"), multiplier)
-        new_cash = normalise_to_units(entry.get("cash_and_equivalents"), multiplier)
 
-        # Upsert: if a record exists, fill in any null key fields.
-        # Revenue comes from income statements, debt/cash from balance sheets —
-        # these may arrive in different search rounds.
-        # If the new source is higher quality (e.g. annual report vs investor
-        # presentation), overwrite existing values too.
+        # Helper to extract value from nested {value, ref, ...} or flat number
+        def _fval(field_name):
+            obj = entry.get(field_name)
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return normalise_to_units(obj.get("value"), multiplier)
+            return normalise_to_units(obj, multiplier)
+
+        def _fref(field_name):
+            obj = entry.get(field_name)
+            return obj.get("ref") if isinstance(obj, dict) else None
+
+        def _fconf(field_name):
+            obj = entry.get(field_name)
+            return obj.get("confidence") if isinstance(obj, dict) else None
+
+        def _flabel(field_name):
+            obj = entry.get(field_name)
+            return obj.get("label") if isinstance(obj, dict) else None
+
+        new_revenue = _fval("revenue")
+        new_gross_debt = _fval("gross_debt")
+        new_lease_liab = _fval("lease_liabilities")
+        new_nci = _fval("non_controlling_interests")
+        new_pref = _fval("preference_shares")
+        new_shares = _fval("shares_outstanding")
+
+        # Legacy fields for backwards compatibility
+        new_debt_legacy = new_gross_debt
+        new_cash = normalise_to_units(
+            entry.get("cash_and_equivalents"), multiplier)
+
+        # Validation
+        val_flags = validate_financial_entry(entry, reporting_year=year)
+        if val_flags:
+            log.info(f"    Year {year}: validation flags: {val_flags}")
+
+        # Upsert logic
         existing_record = (
             session.query(FinancialRecord)
             .filter_by(company_id=company.id, reporting_year=year)
@@ -893,57 +929,142 @@ def _extract_financials_from_document(
             updated = False
             for attr, new_val in [
                 ("revenue", new_revenue),
-                ("outstanding_debt", new_debt),
+                ("gross_debt", new_gross_debt),
+                ("outstanding_debt", new_debt_legacy),
                 ("cash_and_equivalents", new_cash),
+                ("lease_liabilities", new_lease_liab),
+                ("non_controlling_interests", new_nci),
+                ("preference_shares", new_pref),
+                ("shares_outstanding", new_shares),
             ]:
-                old_val = getattr(existing_record, attr)
+                old_val = getattr(existing_record, attr, None)
                 if old_val is None and new_val is not None:
-                    # Fill missing field (any source)
                     setattr(existing_record, attr, new_val)
                     updated = True
                 elif upgrade and new_val is not None and old_val != new_val:
-                    # Overwrite with higher-quality source
                     setattr(existing_record, attr, new_val)
                     updated = True
 
-            # Fill other null metadata regardless of source quality
+            # Fill metadata regardless of source quality
             if existing_record.currency is None and entry.get("currency"):
                 existing_record.currency = entry["currency"]
             if existing_record.fiscal_year_end is None:
-                existing_record.fiscal_year_end = _parse_date(entry.get("fiscal_year_end"))
+                existing_record.fiscal_year_end = _parse_date(
+                    entry.get("reporting_date") or entry.get("fiscal_year_end"))
             if existing_record.period_start is None:
                 existing_record.period_start = _parse_date(entry.get("period_start"))
             if existing_record.period_end is None:
                 existing_record.period_end = _parse_date(entry.get("period_end"))
 
-            if updated:
-                if upgrade:
-                    existing_record.source_id = fin_source.id
-                    existing_record.confidence_score = best_confidence
-                    old_title = old_source.title if old_source else "unknown"
-                    log.info(f"    Year {year}: UPGRADED source "
-                             f"'{old_title}' (q={old_quality}) → "
-                             f"'{title}' (q={new_quality})")
-                else:
-                    log.info(f"    Updated year {year}: filled in missing financial fields")
+            # Update provenance fields on upgrade
+            if updated and upgrade:
+                existing_record.source_id = fin_source.id
+                existing_record.confidence_score = best_confidence
+                existing_record.source_tier = 3
+                existing_record.source_type = source_type
+                existing_record.revenue_ref = _fref("revenue")
+                existing_record.revenue_label = _flabel("revenue")
+                existing_record.revenue_confidence = _fconf("revenue")
+                existing_record.gross_debt_ref = _fref("gross_debt")
+                existing_record.gross_debt_confidence = _fconf("gross_debt")
+                existing_record.nci_ref = _fref("non_controlling_interests")
+                existing_record.nci_confidence = _fconf("non_controlling_interests")
+                existing_record.shares_outstanding_ref = _fref("shares_outstanding")
+                existing_record.shares_outstanding_confidence = _fconf("shares_outstanding")
+                existing_record.lease_liabilities_ref = _fref("lease_liabilities")
+                existing_record.lease_liabilities_confidence = _fconf("lease_liabilities")
+                debt_obj = entry.get("gross_debt")
+                if isinstance(debt_obj, dict) and debt_obj.get("components"):
+                    existing_record.gross_debt_components = json.dumps(
+                        debt_obj["components"])
+                pref_obj = entry.get("preference_shares")
+                if isinstance(pref_obj, dict):
+                    existing_record.preference_shares_classification = pref_obj.get("classification")
+                    existing_record.preference_shares_listed = pref_obj.get("listed")
+                    existing_record.preference_shares_ref = pref_obj.get("ref")
+                shares_obj = entry.get("shares_outstanding")
+                if isinstance(shares_obj, dict):
+                    existing_record.shares_outstanding_share_class = shares_obj.get("share_class")
+                existing_record.is_financial_institution = entry.get("is_financial_institution")
+                if val_flags:
+                    existing_record.validation_flags = json.dumps(val_flags)
+                notes = entry.get("notes", [])
+                if notes:
+                    existing_record.extraction_notes = json.dumps(notes)
+                old_title = old_source.title if old_source else "unknown"
+                log.info(f"    Year {year}: UPGRADED source "
+                         f"'{old_title}' (q={old_quality}) → "
+                         f"'{title}' (q={new_quality})")
+                saved += 1
+            elif updated:
+                log.info(f"    Updated year {year}: filled in missing fields")
                 saved += 1
 
             covered_years.add(year)
             continue
 
+        # New record
+        debt_obj = entry.get("gross_debt")
+        pref_obj = entry.get("preference_shares")
+        shares_obj = entry.get("shares_outstanding")
+        notes = entry.get("notes", [])
+
         fin_record = FinancialRecord(
             company_id=company.id,
             reporting_year=year,
-            fiscal_year_end=_parse_date(entry.get("fiscal_year_end")),
+            fiscal_year_end=_parse_date(
+                entry.get("reporting_date") or entry.get("fiscal_year_end")),
             period_start=_parse_date(entry.get("period_start")),
             period_end=_parse_date(entry.get("period_end")),
-            revenue=new_revenue,
-            outstanding_debt=new_debt,
-            cash_and_equivalents=new_cash,
             currency=entry.get("currency"),
+            units=entry.get("units"),
+            # Core PCAF fields
+            revenue=new_revenue,
+            revenue_label=_flabel("revenue"),
+            revenue_ref=_fref("revenue"),
+            revenue_confidence=_fconf("revenue"),
+            gross_debt=new_gross_debt,
+            gross_debt_components=(
+                json.dumps(debt_obj["components"])
+                if isinstance(debt_obj, dict) and debt_obj.get("components")
+                else None),
+            gross_debt_ref=_fref("gross_debt"),
+            gross_debt_confidence=_fconf("gross_debt"),
+            lease_liabilities=new_lease_liab,
+            lease_liabilities_ref=_fref("lease_liabilities"),
+            lease_liabilities_confidence=_fconf("lease_liabilities"),
+            non_controlling_interests=new_nci,
+            nci_ref=_fref("non_controlling_interests"),
+            nci_confidence=_fconf("non_controlling_interests"),
+            preference_shares=new_pref,
+            preference_shares_classification=(
+                pref_obj.get("classification")
+                if isinstance(pref_obj, dict) else None),
+            preference_shares_listed=(
+                pref_obj.get("listed")
+                if isinstance(pref_obj, dict) else None),
+            preference_shares_ref=(
+                pref_obj.get("ref")
+                if isinstance(pref_obj, dict) else None),
+            shares_outstanding=new_shares,
+            shares_outstanding_share_class=(
+                shares_obj.get("share_class")
+                if isinstance(shares_obj, dict) else None),
+            shares_outstanding_ref=_fref("shares_outstanding"),
+            shares_outstanding_confidence=_fconf("shares_outstanding"),
+            is_financial_institution=entry.get("is_financial_institution"),
+            # Legacy fields
+            outstanding_debt=new_debt_legacy,
+            cash_and_equivalents=new_cash,
+            # Metadata
             source_id=fin_source.id,
+            source_tier=3,
+            source_type=source_type,
             confidence_score=best_confidence,
-            review_status="pending",
+            methodology_notes=fin_extraction_notes,
+            validation_flags=json.dumps(val_flags) if val_flags else None,
+            extraction_notes=json.dumps(notes) if notes else None,
+            review_status="flagged" if val_flags else "pending",
         )
         session.add(fin_record)
         covered_years.add(year)
@@ -1102,6 +1223,8 @@ def process_company(
     exa_key: str,
     llama_key: str,
     session,
+    skip_emissions: bool = False,
+    skip_financial: bool = False,
 ) -> dict:
     """Process a single company: walk backwards from TARGET_END_YEAR to fill gaps.
 
@@ -1126,6 +1249,8 @@ def process_company(
 
     # ── PART 1: Emissions (backwards walk) ─────────────────────────────────
 
+    if skip_emissions:
+        log.info("  Skipping emissions (--financial only)")
     em_covered = _get_covered_years(session, company.id, EmissionsRecord)
     em_pre_existing = set(em_covered)  # years in DB before this run
     em_searched_years = set()          # years explicitly targeted during this run
@@ -1133,7 +1258,7 @@ def process_company(
     total_em_saved = 0
     em_missing = target - em_pre_existing
 
-    if em_missing:
+    if em_missing and not skip_emissions:
         log.info(f"  Emissions: have {sorted(em_pre_existing) or 'none'}, "
                  f"missing {sorted(em_missing)}")
 
@@ -1186,12 +1311,15 @@ def process_company(
 
     # ── PART 2: Financials (backwards walk) ─────────────────────────────────
 
+    if skip_financial:
+        log.info("  Skipping financials (--emissions only)")
+
     fin_covered = _get_covered_years(session, company.id, FinancialRecord)
     fin_missing = _get_financial_needs(session, company.id, target)
     fin_searched_urls = set()
     total_fin_saved = 0
 
-    if fin_missing:
+    if fin_missing and not skip_financial:
         log.info(f"  Financials: have {sorted(fin_covered) or 'none'}, "
                  f"need data for {sorted(fin_missing)}")
 
@@ -1266,7 +1394,7 @@ def process_company(
 
     # ── PART 3: Market data from yfinance ─────────────────────────────────
 
-    if company.ticker:
+    if company.ticker and not skip_financial:
         fin_records = (
             session.query(FinancialRecord)
             .filter_by(company_id=company.id)
@@ -1281,15 +1409,20 @@ def process_company(
                     equity_data = get_equity_value_at_date(company.ticker, target_date)
                     if equity_data:
                         fr.equity_value = equity_data["market_cap"]
-                        fr.shares_outstanding = equity_data["shares_outstanding"]
+                        if fr.shares_outstanding is None:
+                            fr.shares_outstanding = equity_data["shares_outstanding"]
                         fr.share_price_at_fy_end = equity_data["share_price"]
                         fr.equity_currency = equity_data["currency"]
+                        # Legacy enterprise_value
                         if fr.outstanding_debt is not None and fr.cash_and_equivalents is not None:
                             fr.enterprise_value = (
                                 fr.equity_value + fr.outstanding_debt - fr.cash_and_equivalents
                             )
+                        # PCAF EVIC
+                        evic = compute_evic(fr)
+                        evic_str = f", EVIC={evic:,.0f}" if evic else ""
                         log.info(f"    {fr.reporting_year}: equity={fr.equity_value:,.0f} "
-                                 f"{fr.equity_currency}")
+                                 f"{fr.equity_currency}{evic_str}")
                 session.commit()
             except Exception as e:
                 log.warning(f"  Market data fetch failed: {e}")
@@ -1297,7 +1430,7 @@ def process_company(
 
     # ── PART 4: Industry classification ───────────────────────────────────
 
-    if not has_industry and company.ticker:
+    if not has_industry and company.ticker and not skip_financial:
         log.info("  Looking up industry classification...")
         try:
             industry_info = get_industry_info(company.ticker)
@@ -1355,6 +1488,8 @@ def run_pipeline(
     llama_key: str,
     company_ids: list[int] = None,
     delay_between: float = 2.0,
+    skip_emissions: bool = False,
+    skip_financial: bool = False,
 ):
     """Run the full pipeline across all (or specified) companies."""
     session = get_session(database_url)
@@ -1382,7 +1517,10 @@ def run_pipeline(
     for i, company in enumerate(companies):
         log.info(f"[{i + 1}/{len(companies)}] {company.name}")
         try:
-            result = process_company(company, anthropic_key, exa_key, llama_key, session)
+            result = process_company(
+                company, anthropic_key, exa_key, llama_key, session,
+                skip_emissions=skip_emissions, skip_financial=skip_financial,
+            )
             results.append(result)
             cd = result.get("cost_detail", {})
             for k in ("total", "calls", "input_tokens", "output_tokens"):

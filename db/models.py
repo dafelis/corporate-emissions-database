@@ -125,27 +125,62 @@ class FinancialRecord(Base):
     period_start = Column(Date)   # e.g. 2025-01-01 or 2025-04-01
     period_end = Column(Date)     # e.g. 2025-12-31 or 2026-03-31
 
-    # From company reports (in reporting currency)
+    # ── PCAF EVIC inputs (from filings) ──────────────────────────────
     revenue = Column(Float)
-    outstanding_debt = Column(Float)
-    cash_and_equivalents = Column(Float)
-    currency = Column(String(10))  # e.g. "GBP", "USD", "EUR"
+    outstanding_debt = Column(Float)         # legacy alias; prefer gross_debt
+    cash_and_equivalents = Column(Float)     # legacy; kept for backwards compat
+    currency = Column(String(10))            # ISO currency code
+    units = Column(String(20))               # "units", "thousands", "millions"
 
-    # From market data (yfinance)
-    equity_value = Column(Float)          # market cap at fiscal year-end
-    shares_outstanding = Column(Float)
+    gross_debt = Column(Float)               # interest-bearing borrowings incl. leases
+    gross_debt_components = Column(Text)     # JSON: component lines summed
+    gross_debt_ref = Column(Text)            # XBRL concept+context or page number
+    gross_debt_confidence = Column(String(10))
+
+    lease_liabilities = Column(Float)        # current + non-current
+    lease_liabilities_ref = Column(Text)
+    lease_liabilities_confidence = Column(String(10))
+
+    non_controlling_interests = Column(Float)
+    nci_ref = Column(Text)
+    nci_confidence = Column(String(10))
+
+    preference_shares = Column(Float)
+    preference_shares_classification = Column(String(20))  # equity / liability
+    preference_shares_listed = Column(Boolean)
+    preference_shares_ref = Column(Text)
+
+    shares_outstanding = Column(Float)       # net of treasury
+    shares_outstanding_share_class = Column(String(100))
+    shares_outstanding_ref = Column(Text)
+    shares_outstanding_confidence = Column(String(10))
+
+    revenue_label = Column(String(200))      # label as printed in source
+    revenue_ref = Column(Text)
+    revenue_confidence = Column(String(10))
+
+    is_financial_institution = Column(Boolean)
+
+    # ── From market data (yfinance) ──────────────────────────────────
+    equity_value = Column(Float)             # market cap at fiscal year-end
     share_price_at_fy_end = Column(Float)
-    equity_currency = Column(String(10))  # currency of equity value
+    equity_currency = Column(String(10))
 
-    # Calculated
-    enterprise_value = Column(Float)  # equity_value + debt - cash
+    # ── Calculated ───────────────────────────────────────────────────
+    enterprise_value = Column(Float)         # legacy: equity + debt - cash
+    evic = Column(Float)                     # market_cap + gross_debt + NCI + pref shares
 
-    # Extraction metadata
+    # ── Source / tier metadata ───────────────────────────────────────
     source_id = Column(Integer, ForeignKey("sources.id"))
+    source_tier = Column(Integer)            # 1, 2, or 3
+    source_type = Column(String(50))         # "xbrl", "pdf", "html", etc.
     extraction_date = Column(DateTime, default=datetime.utcnow)
-    confidence_score = Column(Integer)  # 0-100
+    confidence_score = Column(Integer)       # 0-100
+    methodology_notes = Column(Text)
+    validation_flags = Column(Text)          # JSON array of flag strings
+    extraction_notes = Column(Text)          # JSON array of notes
 
-    # Review status
+    # ── Review status ────────────────────────────────────────────────
     review_status = Column(String(20), default="pending")
     flag_reason = Column(Text)
     reviewed_by = Column(String(100))
