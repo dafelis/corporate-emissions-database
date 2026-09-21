@@ -848,12 +848,10 @@ def render_review():
             if _fa("evic") and _fa("equity_value"):
                 debt_part = (_fa("gross_debt") or 0)
                 nci_part = (_fa("non_controlling_interests") or 0)
-                pref_part = (_fa("preference_shares") or 0)
                 st.caption(
-                    f"EVIC = {_fmt_currency(_fa('equity_value'))} (equity) "
-                    f"+ {_fmt_currency(debt_part)} (debt) "
-                    f"+ {_fmt_currency(nci_part)} (NCI) "
-                    f"+ {_fmt_currency(pref_part)} (pref)"
+                    f"EVIC = {_fmt_currency(_fa('equity_value'))} (market cap) "
+                    f"+ {_fmt_currency(debt_part)} (total debt) "
+                    f"+ {_fmt_currency(nci_part)} (NCI)"
                 )
             if _fa("validation_flags"):
                 try:

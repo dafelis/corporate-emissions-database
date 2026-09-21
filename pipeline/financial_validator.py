@@ -79,8 +79,8 @@ def validate_financial_entry(entry, reporting_year=None):
 def compute_evic(record):
     """Compute EVIC from a FinancialRecord (DB model instance).
 
-    EVIC = market_cap + gross_debt + NCI + preference_shares
-    (market value if listed, else book). Cash is NOT subtracted.
+    PCAF definition: EVIC = market_cap + total_debt (book value) + NCI
+    Cash is NOT subtracted. Preference shares stored but not in EVIC.
 
     Returns the EVIC value or None if required inputs are missing.
     Sets record.evic and record.validation_flags.
@@ -108,9 +108,8 @@ def compute_evic(record):
 
     debt = record.gross_debt or 0
     nci = record.non_controlling_interests or 0
-    pref = record.preference_shares or 0
 
-    evic = market_cap + debt + nci + pref
+    evic = market_cap + debt + nci
     record.evic = evic
 
     if record.gross_debt is None:
