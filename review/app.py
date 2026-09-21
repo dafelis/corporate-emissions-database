@@ -570,17 +570,17 @@ def render_data_table():
                 row["Emissions Source Title"] = em_source.title if em_source else ""
             if fin:
                 row["Financial Status"] = fin.review_status
-                row["Revenue"] = fin.revenue
-                row["Gross Debt"] = fin.gross_debt
-                row["Lease Liabilities"] = fin.lease_liabilities
-                row["NCI"] = fin.non_controlling_interests
-                row["Preference Shares"] = fin.preference_shares
-                row["Shares Outstanding"] = fin.shares_outstanding
-                row["Equity Value"] = fin.equity_value
-                row["EVIC"] = fin.evic
-                row["Currency"] = fin.currency
-                row["Source Tier"] = fin.source_tier
-                if fin.period_start and fin.period_end:
+                row["Revenue"] = getattr(fin, "revenue", None)
+                row["Gross Debt"] = getattr(fin, "gross_debt", None)
+                row["Lease Liabilities"] = getattr(fin, "lease_liabilities", None)
+                row["NCI"] = getattr(fin, "non_controlling_interests", None)
+                row["Preference Shares"] = getattr(fin, "preference_shares", None)
+                row["Shares Outstanding"] = getattr(fin, "shares_outstanding", None)
+                row["Equity Value"] = getattr(fin, "equity_value", None)
+                row["EVIC"] = getattr(fin, "evic", None)
+                row["Currency"] = getattr(fin, "currency", None)
+                row["Source Tier"] = getattr(fin, "source_tier", None)
+                if getattr(fin, "period_start", None) and getattr(fin, "period_end", None):
                     row["Financial Period"] = f"{fin.period_start} to {fin.period_end}"
                 fin_source = session.query(Source).get(fin.source_id) if fin.source_id else None
                 row["Financial Source URL"] = fin_source.url if fin_source else ""
@@ -774,12 +774,16 @@ def render_review():
 
     if fin_record:
         st.markdown("---")
+        # Safe accessor for columns that may not exist in older DBs
+        def _fa(attr, default=None):
+            return getattr(fin_record, attr, default)
+
         tier_label = {1: "Tier 1 (XBRL API)", 2: "Tier 2 (yfinance)", 3: "Tier 3 (PDF/LLM)"}.get(
-            fin_record.source_tier, "Unknown")
+            _fa("source_tier"), "Unknown")
         st.subheader(f"Financial Data — {tier_label}")
-        if fin_record.period_start and fin_record.period_end:
+        if _fa("period_start") and _fa("period_end"):
             st.caption(f"📅 Financial period: {fin_record.period_start.strftime('%d %b %Y')} – {fin_record.period_end.strftime('%d %b %Y')}")
-        elif fin_record.fiscal_year_end:
+        elif _fa("fiscal_year_end"):
             st.caption(f"📅 Fiscal year ending: {fin_record.fiscal_year_end.strftime('%d %b %Y')}")
 
         def _fmt_currency(value, currency=""):
@@ -801,18 +805,18 @@ def render_review():
                 return "🔴"
             return ""
 
-        ccy = fin_record.currency or ""
+        ccy = _fa("currency") or ""
 
         fin_col1, fin_col2 = st.columns(2)
         with fin_col1:
             st.markdown("**PCAF EVIC inputs (from filings):**")
             pcaf_rows = [
-                ("Revenue", fin_record.revenue, fin_record.revenue_confidence, fin_record.revenue_ref),
-                ("Gross debt", fin_record.gross_debt, fin_record.gross_debt_confidence, fin_record.gross_debt_ref),
-                ("Lease liabilities", fin_record.lease_liabilities, fin_record.lease_liabilities_confidence, fin_record.lease_liabilities_ref),
-                ("Non-controlling interests", fin_record.non_controlling_interests, fin_record.nci_confidence, fin_record.nci_ref),
-                ("Preference shares", fin_record.preference_shares, None, fin_record.preference_shares_ref),
-                ("Shares outstanding", fin_record.shares_outstanding, fin_record.shares_outstanding_confidence, fin_record.shares_outstanding_ref),
+                ("Revenue", _fa("revenue"), _fa("revenue_confidence"), _fa("revenue_ref")),
+                ("Gross debt", _fa("gross_debt"), _fa("gross_debt_confidence"), _fa("gross_debt_ref")),
+                ("Lease liabilities", _fa("lease_liabilities"), _fa("lease_liabilities_confidence"), _fa("lease_liabilities_ref")),
+                ("Non-controlling interests", _fa("non_controlling_interests"), _fa("nci_confidence"), _fa("nci_ref")),
+                ("Preference shares", _fa("preference_shares"), None, _fa("preference_shares_ref")),
+                ("Shares outstanding", _fa("shares_outstanding"), _fa("shares_outstanding_confidence"), _fa("shares_outstanding_ref")),
             ]
             st.table(pd.DataFrame({
                 "Metric": [r[0] for r in pcaf_rows],
@@ -820,14 +824,14 @@ def render_review():
                 "Conf.": [_conf_icon(r[2]) for r in pcaf_rows],
                 "Ref": [r[3] or "—" for r in pcaf_rows],
             }))
-            if fin_record.gross_debt_components:
+            if _fa("gross_debt_components"):
                 try:
                     components_list = json.loads(fin_record.gross_debt_components)
                     if components_list:
                         st.caption(f"Debt components: {', '.join(components_list)}")
                 except (json.JSONDecodeError, TypeError):
                     pass
-            if fin_record.is_financial_institution:
+            if _fa("is_financial_institution"):
                 st.warning("Classified as financial institution (bank/insurer/asset manager)")
 
         with fin_col2:
@@ -835,23 +839,23 @@ def render_review():
             st.table(pd.DataFrame({
                 "Metric": ["Equity value (market cap)", "EVIC"],
                 "Value": [
-                    _fmt_currency(fin_record.equity_value, fin_record.equity_currency),
-                    _fmt_currency(fin_record.evic, fin_record.equity_currency or ccy),
+                    _fmt_currency(_fa("equity_value"), _fa("equity_currency")),
+                    _fmt_currency(_fa("evic"), _fa("equity_currency") or ccy),
                 ],
             }))
-            if fin_record.fiscal_year_end:
+            if _fa("fiscal_year_end"):
                 st.caption(f"As at fiscal year-end: {fin_record.fiscal_year_end}")
-            if fin_record.evic and fin_record.equity_value:
-                debt_part = (fin_record.gross_debt or 0)
-                nci_part = (fin_record.non_controlling_interests or 0)
-                pref_part = (fin_record.preference_shares or 0)
+            if _fa("evic") and _fa("equity_value"):
+                debt_part = (_fa("gross_debt") or 0)
+                nci_part = (_fa("non_controlling_interests") or 0)
+                pref_part = (_fa("preference_shares") or 0)
                 st.caption(
-                    f"EVIC = {_fmt_currency(fin_record.equity_value)} (equity) "
+                    f"EVIC = {_fmt_currency(_fa('equity_value'))} (equity) "
                     f"+ {_fmt_currency(debt_part)} (debt) "
                     f"+ {_fmt_currency(nci_part)} (NCI) "
                     f"+ {_fmt_currency(pref_part)} (pref)"
                 )
-            if fin_record.validation_flags:
+            if _fa("validation_flags"):
                 try:
                     flags = json.loads(fin_record.validation_flags)
                     if flags:
@@ -860,7 +864,7 @@ def render_review():
                     pass
 
         # Financial source info
-        fin_source = fin_record.source if fin_record.source_id else None
+        fin_source = fin_record.source if getattr(fin_record, "source_id", None) else None
         if fin_source:
             st.markdown("**Financial source:**")
             st.write(f"📄 {fin_source.title or 'Untitled'}")
