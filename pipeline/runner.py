@@ -32,6 +32,9 @@ from pipeline.extractor import (
 )
 from pipeline.financial_extractor import find_financial_tables, extract_financials, normalise_to_units
 from pipeline.financial_validator import validate_financial_entry, compute_evic
+from pipeline.tier1_xbrl import extract_financials_from_xbrl
+from pipeline.tier1_edgar import extract_financials_from_edgar
+from pipeline.tier2_yfinance import extract_financials_from_yfinance
 from pipeline.market_data import get_equity_value_at_date, get_industry_info
 from pipeline.industry_classifier import classify_company
 from pipeline.storage import upload_file
@@ -1081,6 +1084,285 @@ def _extract_financials_from_document(
     return saved
 
 
+def _save_api_financial_entries(
+    entries: list[dict],
+    company,
+    session,
+    covered_years: set,
+    source_url: str,
+    source_title: str,
+    tier: int,
+    events=None,
+) -> int:
+    """Save structured financial entries from Tier 1/2 APIs to the database.
+
+    Returns count of records created or updated.
+    """
+    if not entries:
+        return 0
+
+    api_source = Source(
+        company_id=company.id,
+        url=source_url,
+        title=source_title,
+        document_type="api",
+    )
+    session.add(api_source)
+    session.flush()
+
+    saved = 0
+    for entry in entries:
+        year = entry["reporting_year"]
+        if year < TARGET_START_YEAR:
+            continue
+
+        multiplier = entry.get("unit_multiplier", 1) or 1
+
+        def _fval(field_name):
+            obj = entry.get(field_name)
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return normalise_to_units(obj.get("value"), multiplier)
+            return normalise_to_units(obj, multiplier)
+
+        def _fref(field_name):
+            obj = entry.get(field_name)
+            return obj.get("ref") if isinstance(obj, dict) else None
+
+        def _fconf(field_name):
+            obj = entry.get(field_name)
+            return obj.get("confidence") if isinstance(obj, dict) else None
+
+        def _flabel(field_name):
+            obj = entry.get(field_name)
+            return obj.get("label") if isinstance(obj, dict) else None
+
+        new_revenue = _fval("revenue")
+        new_gross_debt = _fval("gross_debt")
+        new_lease_liab = _fval("lease_liabilities")
+        new_nci = _fval("non_controlling_interests")
+        new_pref = _fval("preference_shares")
+        new_shares = _fval("shares_outstanding")
+        new_cash = normalise_to_units(entry.get("cash_and_equivalents"), multiplier)
+
+        val_flags = validate_financial_entry(entry, reporting_year=year)
+        if val_flags:
+            log.info(f"    Year {year}: validation flags: {val_flags}")
+
+        existing = (
+            session.query(FinancialRecord)
+            .filter_by(company_id=company.id, reporting_year=year)
+            .first()
+        )
+
+        if existing:
+            # API data (Tier 1/2) is high-confidence structured data —
+            # fill nulls, and upgrade from lower tiers
+            upgrade = (existing.source_tier or 99) > tier
+            updated = False
+            for attr, new_val in [
+                ("revenue", new_revenue),
+                ("gross_debt", new_gross_debt),
+                ("outstanding_debt", new_gross_debt),
+                ("cash_and_equivalents", new_cash),
+                ("lease_liabilities", new_lease_liab),
+                ("non_controlling_interests", new_nci),
+                ("preference_shares", new_pref),
+                ("shares_outstanding", new_shares),
+            ]:
+                old_val = getattr(existing, attr, None)
+                if old_val is None and new_val is not None:
+                    setattr(existing, attr, new_val)
+                    updated = True
+                elif upgrade and new_val is not None and old_val != new_val:
+                    setattr(existing, attr, new_val)
+                    updated = True
+
+            if existing.currency is None and entry.get("currency"):
+                existing.currency = entry["currency"]
+            if existing.fiscal_year_end is None:
+                existing.fiscal_year_end = _parse_date(entry.get("reporting_date"))
+
+            if updated:
+                existing.source_id = api_source.id
+                existing.source_tier = tier
+                existing.source_type = "api"
+                existing.revenue_ref = _fref("revenue")
+                existing.revenue_label = _flabel("revenue")
+                existing.revenue_confidence = _fconf("revenue")
+                existing.gross_debt_ref = _fref("gross_debt")
+                existing.gross_debt_confidence = _fconf("gross_debt")
+                existing.nci_ref = _fref("non_controlling_interests")
+                existing.nci_confidence = _fconf("non_controlling_interests")
+                existing.shares_outstanding_ref = _fref("shares_outstanding")
+                existing.shares_outstanding_confidence = _fconf("shares_outstanding")
+                existing.lease_liabilities_ref = _fref("lease_liabilities")
+                existing.lease_liabilities_confidence = _fconf("lease_liabilities")
+                existing.is_financial_institution = entry.get("is_financial_institution")
+                notes = entry.get("notes", [])
+                if notes:
+                    existing.extraction_notes = json.dumps(notes)
+                if val_flags:
+                    existing.validation_flags = json.dumps(val_flags)
+                log.info(f"    Year {year}: updated from Tier {tier} API")
+                saved += 1
+
+            covered_years.add(year)
+            continue
+
+        # New record
+        debt_obj = entry.get("gross_debt")
+        pref_obj = entry.get("preference_shares")
+        shares_obj = entry.get("shares_outstanding")
+        notes = entry.get("notes", [])
+
+        fin_record = FinancialRecord(
+            company_id=company.id,
+            reporting_year=year,
+            fiscal_year_end=_parse_date(entry.get("reporting_date")),
+            currency=entry.get("currency"),
+            revenue=new_revenue,
+            revenue_label=_flabel("revenue"),
+            revenue_ref=_fref("revenue"),
+            revenue_confidence=_fconf("revenue"),
+            gross_debt=new_gross_debt,
+            gross_debt_components=(
+                json.dumps(debt_obj["components"])
+                if isinstance(debt_obj, dict) and debt_obj.get("components")
+                else None),
+            gross_debt_ref=_fref("gross_debt"),
+            gross_debt_confidence=_fconf("gross_debt"),
+            lease_liabilities=new_lease_liab,
+            lease_liabilities_ref=_fref("lease_liabilities"),
+            lease_liabilities_confidence=_fconf("lease_liabilities"),
+            non_controlling_interests=new_nci,
+            nci_ref=_fref("non_controlling_interests"),
+            nci_confidence=_fconf("non_controlling_interests"),
+            preference_shares=new_pref,
+            preference_shares_classification=(
+                pref_obj.get("classification")
+                if isinstance(pref_obj, dict) else None),
+            preference_shares_listed=(
+                pref_obj.get("listed")
+                if isinstance(pref_obj, dict) else None),
+            preference_shares_ref=(
+                pref_obj.get("ref")
+                if isinstance(pref_obj, dict) else None),
+            shares_outstanding=new_shares,
+            shares_outstanding_share_class=(
+                shares_obj.get("share_class")
+                if isinstance(shares_obj, dict) else None),
+            shares_outstanding_ref=_fref("shares_outstanding"),
+            shares_outstanding_confidence=_fconf("shares_outstanding"),
+            is_financial_institution=entry.get("is_financial_institution"),
+            outstanding_debt=new_gross_debt,
+            cash_and_equivalents=new_cash,
+            source_id=api_source.id,
+            source_tier=tier,
+            source_type="api",
+            validation_flags=json.dumps(val_flags) if val_flags else None,
+            extraction_notes=json.dumps(notes) if notes else None,
+            review_status="flagged" if val_flags else "pending",
+        )
+        session.add(fin_record)
+        covered_years.add(year)
+        saved += 1
+
+    session.commit()
+
+    if events is not None and saved:
+        years_saved = {e["reporting_year"] for e in entries
+                       if e["reporting_year"] >= TARGET_START_YEAR}
+        events.append({
+            "type": "source", "url": source_url,
+            "title": source_title, "years": years_saved,
+        })
+        events.append({"type": "financial", "years": years_saved})
+
+    return saved
+
+
+def _run_tier1_and_tier2(
+    company, company_name, session, fin_covered, target, events=None,
+) -> int:
+    """Run Tier 1 (XBRL APIs) and Tier 2 (yfinance) for financial data.
+
+    Returns total count of records saved/updated.
+    """
+    total_saved = 0
+    fin_missing = _get_financial_needs(session, company.id, target)
+
+    if not fin_missing:
+        return 0
+
+    # ── Tier 1a: filings.xbrl.org (UK ESEF/UKSEF) ────────────────────
+    if company.lei:
+        log.info(f"  Tier 1 XBRL: searching filings.xbrl.org (LEI {company.lei})")
+        try:
+            xbrl_entries = extract_financials_from_xbrl(
+                company.lei, company_name, fin_missing)
+            if xbrl_entries:
+                saved = _save_api_financial_entries(
+                    xbrl_entries, company, session, fin_covered,
+                    source_url=f"xbrl:{company.lei}",
+                    source_title=f"XBRL IFRS filing ({company.lei})",
+                    tier=1, events=events,
+                )
+                total_saved += saved
+                fin_missing = _get_financial_needs(session, company.id, target)
+                log.info(f"  Tier 1 XBRL: saved {saved} record(s), "
+                         f"still need {sorted(fin_missing) or 'nothing'}")
+        except Exception as e:
+            log.warning(f"  Tier 1 XBRL: failed: {e}")
+
+    # ── Tier 1b: SEC EDGAR (dual-listed / US filers) ─────────────────
+    if company.ticker and fin_missing:
+        log.info(f"  Tier 1 EDGAR: searching SEC filings ({company.ticker})")
+        try:
+            edgar_entries = extract_financials_from_edgar(
+                company.ticker, company_name, fin_missing)
+            if edgar_entries:
+                saved = _save_api_financial_entries(
+                    edgar_entries, company, session, fin_covered,
+                    source_url=f"edgar:{company.ticker}",
+                    source_title=f"SEC EDGAR XBRL ({company.ticker})",
+                    tier=1, events=events,
+                )
+                total_saved += saved
+                fin_missing = _get_financial_needs(session, company.id, target)
+                log.info(f"  Tier 1 EDGAR: saved {saved} record(s), "
+                         f"still need {sorted(fin_missing) or 'nothing'}")
+        except Exception as e:
+            log.warning(f"  Tier 1 EDGAR: failed: {e}")
+
+    # ── Tier 2: yfinance structured data ─────────────────────────────
+    if company.ticker and fin_missing:
+        log.info(f"  Tier 2 yfinance: fetching financial data ({company.ticker})")
+        try:
+            yf_entries = extract_financials_from_yfinance(
+                company.ticker, company_name)
+            if yf_entries:
+                # Filter to only years we still need
+                yf_filtered = [e for e in yf_entries
+                               if e["reporting_year"] in fin_missing]
+                if yf_filtered:
+                    saved = _save_api_financial_entries(
+                        yf_filtered, company, session, fin_covered,
+                        source_url=f"yfinance:{company.ticker}",
+                        source_title=f"Yahoo Finance ({company.ticker})",
+                        tier=2, events=events,
+                    )
+                    total_saved += saved
+                    fin_missing = _get_financial_needs(session, company.id, target)
+                    log.info(f"  Tier 2 yfinance: saved {saved} record(s), "
+                             f"still need {sorted(fin_missing) or 'nothing'}")
+        except Exception as e:
+            log.warning(f"  Tier 2 yfinance: failed: {e}")
+
+    return total_saved
+
+
 def _extract_financials_round(
     company, company_name, client, anthropic_key, exa_key, llama_key,
     session, covered_years, searched_urls, target_year=None, events=None,
@@ -1309,7 +1591,7 @@ def process_company(
             log.info(f"  Emissions: no data found for years {sorted(em_missing)}")
             events.append({"type": "gap", "data_type": "emissions", "years": em_missing})
 
-    # ── PART 2: Financials (backwards walk) ─────────────────────────────────
+    # ── PART 2: Financials — Tier 1 (XBRL APIs) → Tier 2 (yfinance) → Tier 3 (Exa+PDF) ──
 
     if skip_financial:
         log.info("  Skipping financials (--emissions only)")
@@ -1323,65 +1605,80 @@ def process_company(
         log.info(f"  Financials: have {sorted(fin_covered) or 'none'}, "
                  f"need data for {sorted(fin_missing)}")
 
-        # Search 1: try a five-year financial summary first (covers most years in one hit)
-        log.info(f"  Financial search 1 (five-year summary)")
-        try:
-            fin_history_search = search_for_financial_history(
-                company_name, anthropic_key, exa_key,
-                exclude_urls=list(fin_searched_urls),
-            )
-            candidates = fin_history_search.get("candidates", [fin_history_search])
-            url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
-                candidates, fin_searched_urls, llama_key,
-            )
-            saved = _extract_financials_from_document(
-                url, title, source_type, table_dicts, tables_md,
-                company, company_name, client, session, fin_covered,
-                events=events,
-            )
-            total_fin_saved += saved
-            fin_missing = _get_financial_needs(session, company.id, target)
-        except Exception as e:
-            log.warning(f"    Five-year summary search failed: {e}")
-            events.append({"type": "error", "message": f"Financial summary: {e}"})
-            session.rollback()
+        # ── Tier 1 + Tier 2: structured API sources (free, fast, reliable) ──
+        api_saved = _run_tier1_and_tier2(
+            company, company_name, session, fin_covered, target, events=events)
+        total_fin_saved += api_saved
 
-        # Walk backwards through remaining years
-        search_count = 1  # already used one search for five-year summary
-        consecutive_empty = 0
-        walk_year = TARGET_END_YEAR
-        while walk_year >= TARGET_START_YEAR and search_count < MAX_SEARCHES:
-            fin_missing = _get_financial_needs(session, company.id, target)
-            if walk_year not in fin_missing:
-                walk_year -= 1
-                continue
+        fin_missing = _get_financial_needs(session, company.id, target)
+        if fin_missing:
+            log.info(f"  After Tier 1+2: still need {sorted(fin_missing)}")
+        else:
+            log.info(f"  Tier 1+2 covered all target years — skipping Tier 3")
 
-            search_count += 1
-            log.info(f"  Financial search {search_count}/{MAX_SEARCHES} "
-                     f"(year {walk_year})")
+        # ── Tier 3: Exa search + PDF/HTML extraction (expensive fallback) ──
+        if fin_missing:
+            log.info(f"  Tier 3: searching for remaining years {sorted(fin_missing)}")
+
+            # Search 1: try a five-year financial summary first
+            log.info(f"  Tier 3 search 1 (five-year summary)")
             try:
-                saved = _extract_financials_round(
-                    company, company_name, client, anthropic_key, exa_key, llama_key,
-                    session, fin_covered, fin_searched_urls, target_year=walk_year,
+                fin_history_search = search_for_financial_history(
+                    company_name, anthropic_key, exa_key,
+                    exclude_urls=list(fin_searched_urls),
+                )
+                candidates = fin_history_search.get("candidates", [fin_history_search])
+                url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
+                    candidates, fin_searched_urls, llama_key,
+                )
+                saved = _extract_financials_from_document(
+                    url, title, source_type, table_dicts, tables_md,
+                    company, company_name, client, session, fin_covered,
                     events=events,
                 )
                 total_fin_saved += saved
-                if saved == 0:
+                fin_missing = _get_financial_needs(session, company.id, target)
+            except Exception as e:
+                log.warning(f"    Five-year summary search failed: {e}")
+                events.append({"type": "error", "message": f"Financial summary: {e}"})
+                session.rollback()
+
+            # Walk backwards through remaining years
+            search_count = 1  # already used one search for five-year summary
+            consecutive_empty = 0
+            walk_year = TARGET_END_YEAR
+            while walk_year >= TARGET_START_YEAR and search_count < MAX_SEARCHES:
+                fin_missing = _get_financial_needs(session, company.id, target)
+                if walk_year not in fin_missing:
+                    walk_year -= 1
+                    continue
+
+                search_count += 1
+                log.info(f"  Tier 3 search {search_count}/{MAX_SEARCHES} "
+                         f"(year {walk_year})")
+                try:
+                    saved = _extract_financials_round(
+                        company, company_name, client, anthropic_key, exa_key, llama_key,
+                        session, fin_covered, fin_searched_urls, target_year=walk_year,
+                        events=events,
+                    )
+                    total_fin_saved += saved
+                    if saved == 0:
+                        consecutive_empty += 1
+                        if consecutive_empty >= 3:
+                            log.info("    Three consecutive empty searches, stopping")
+                            break
+                    else:
+                        consecutive_empty = 0
+                except Exception as e:
+                    log.warning(f"    Financial search failed: {e}")
+                    events.append({"type": "error", "message": f"Financial {walk_year}: {e}"})
+                    session.rollback()
                     consecutive_empty += 1
                     if consecutive_empty >= 3:
-                        log.info("    Three consecutive empty searches, stopping")
                         break
-                else:
-                    consecutive_empty = 0
-            except Exception as e:
-                log.warning(f"    Financial search failed: {e}")
-                events.append({"type": "error", "message": f"Financial {walk_year}: {e}"})
-                session.rollback()
-                consecutive_empty += 1
-                if consecutive_empty >= 3:
-                    break
 
-            walk_year -= 1
+                walk_year -= 1
 
         if total_fin_saved:
             fin_covered = _get_covered_years(session, company.id, FinancialRecord)
