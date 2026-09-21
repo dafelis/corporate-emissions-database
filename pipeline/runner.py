@@ -13,7 +13,6 @@ import time
 from datetime import datetime, date as date_type
 
 import anthropic
-from exa_py import Exa
 
 from db.models import (
     Company, EmissionsRecord, FinancialRecord, Source, PipelineRun,
@@ -349,27 +348,6 @@ def _rank_evidence_pages(entry, filtered_pages, page_texts, top_n=3):
     return results
 
 
-def _find_archive_page(company_name, exa_key):
-    """Search for the company's sustainability report archive/downloads page.
-
-    Returns the URL of the first non-PDF result (a landing page), or None.
-    """
-    try:
-        exa = Exa(api_key=exa_key)
-        response = exa.search(
-            f"{company_name} sustainability reports previous years downloads",
-            num_results=5, type="auto",
-        )
-        for result in response.results:
-            if not result.url.lower().split("?")[0].endswith(".pdf"):
-                log.info(f"    Archive page: {result.title}")
-                log.info(f"      {result.url[:100]}")
-                return result.url
-    except Exception as e:
-        log.warning(f"    Archive page search failed: {e}")
-    return None
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # Emissions extraction (iterative)
 # ══════════════════════════════════════════════════════════════════════════
@@ -377,27 +355,20 @@ def _find_archive_page(company_name, exa_key):
 def _extract_emissions_round(
     company, company_name, client, anthropic_key, exa_key, llama_key,
     session, covered_years, searched_urls, target_year=None, events=None,
-    override_candidates=None,
 ):
     """Run one search→parse→extract cycle for emissions. Returns count saved.
 
     Tries ALL high-scoring tables in the document, accumulating unique years
     across them (a trend table, a detailed scope table, and a Scope 3
     breakdown may each contribute different years).
-
-    If override_candidates is given, skip the Exa search and use those
-    candidates directly (used by the archive-page fallback).
     """
     saved = 0
 
-    if override_candidates:
-        candidates = override_candidates
-    else:
-        search_result = search_for_emissions_source(
-            company_name, anthropic_key, exa_key,
-            target_year=target_year, exclude_urls=list(searched_urls),
-        )
-        candidates = search_result.get("candidates", [search_result])
+    search_result = search_for_emissions_source(
+        company_name, anthropic_key, exa_key,
+        target_year=target_year, exclude_urls=list(searched_urls),
+    )
+    candidates = search_result.get("candidates", [search_result])
     url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
         candidates, searched_urls, llama_key,
     )
@@ -1204,50 +1175,6 @@ def process_company(
                     break
 
             walk_year -= 1
-
-        # ── Archive fallback for still-missing years ──────────────────
-        em_missing = target - em_covered
-        if em_missing:
-            log.info(f"  Emissions: trying archive fallback for "
-                     f"{sorted(em_missing)}")
-            # Search for the archive page once, then scrape per year
-            archive_url = _find_archive_page(company_name, exa_key)
-            if archive_url:
-                for missing_year in sorted(em_missing, reverse=True):
-                    if missing_year in em_covered:
-                        continue
-                    try:
-                        from pipeline.searcher import scrape_report_pdfs
-                        all_pdfs = scrape_report_pdfs(
-                            archive_url, target_year=missing_year)
-                        candidates = [
-                            p for p in all_pdfs
-                            if p["url"] not in em_searched_urls
-                        ]
-                        if not candidates:
-                            log.info(f"    Year {missing_year}: no "
-                                     f"archive PDFs found")
-                            continue
-
-                        log.info(f"    Year {missing_year}: trying "
-                                 f"{len(candidates)} archive PDF(s)")
-                        saved = _extract_emissions_round(
-                            company, company_name, client,
-                            anthropic_key, exa_key, llama_key,
-                            session, em_covered, em_searched_urls,
-                            target_year=missing_year, events=events,
-                            override_candidates=candidates,
-                        )
-                        total_em_saved += saved
-                        if saved:
-                            log.info(f"    Year {missing_year}: archive "
-                                     f"fallback saved {saved} record(s)")
-                    except Exception as e:
-                        log.warning(f"    Archive fallback "
-                                    f"{missing_year}: {e}")
-                        session.rollback()
-            else:
-                log.info("    No archive page found")
 
         em_missing = target - em_covered
         if total_em_saved:
