@@ -18,12 +18,12 @@ _BASE = "https://data.sec.gov/api/xbrl"
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _HEADERS = {"User-Agent": _USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 
-# Cache the ticker→CIK mapping in memory
-_cik_cache: dict[str, int] = {}
+# Cache the ticker→(CIK, SEC title) mapping in memory
+_cik_cache: dict[str, tuple[int, str]] = {}
 
 
-def _load_cik_map() -> dict[str, int]:
-    """Load the SEC ticker→CIK map (cached after first call)."""
+def _load_cik_map() -> dict[str, tuple[int, str]]:
+    """Load the SEC ticker→(CIK, title) map (cached after first call)."""
     if _cik_cache:
         return _cik_cache
     try:
@@ -31,25 +31,51 @@ def _load_cik_map() -> dict[str, int]:
         resp.raise_for_status()
         for entry in resp.json().values():
             ticker = entry["ticker"].upper()
-            _cik_cache[ticker] = entry["cik_str"]
+            _cik_cache[ticker] = (entry["cik_str"], entry.get("title", ""))
         log.info(f"  Tier 1 EDGAR: loaded {len(_cik_cache)} ticker→CIK mappings")
     except Exception as e:
         log.warning(f"  Tier 1 EDGAR: failed to load CIK map: {e}")
     return _cik_cache
 
 
-def _get_cik(ticker: str) -> int | None:
-    """Look up a company's CIK from its ticker symbol."""
+def _name_matches(sec_title: str, company_name: str) -> bool:
+    """Check whether the SEC filer name plausibly matches our company name."""
+    a = sec_title.upper().strip()
+    b = company_name.upper().strip()
+    if not a or not b:
+        return False
+    # Strip common suffixes for comparison
+    for suffix in (" PLC", " LTD", " LIMITED", " INC", " INC.", " CORP",
+                   " CORP.", " GROUP", " HOLDINGS", " CO", " CO."):
+        a = a.removesuffix(suffix)
+        b = b.removesuffix(suffix)
+    # Exact match after cleanup
+    if a == b:
+        return True
+    # One name contains the other (e.g. "BP" in "BP PLC")
+    if a in b or b in a:
+        return True
+    # First significant word matches (e.g. "SHELL" in "SHELL PLC" vs "Shell")
+    a_words = a.split()
+    b_words = b.split()
+    if a_words and b_words and a_words[0] == b_words[0] and len(a_words[0]) >= 3:
+        return True
+    return False
+
+
+def _get_cik(ticker: str, company_name: str) -> int | None:
+    """Look up a company's CIK from its ticker, verifying the name matches."""
     cik_map = _load_cik_map()
 
-    # Try the raw ticker first (e.g. "AZN" for AstraZeneca)
     clean = ticker.upper().replace(".L", "")
-    if clean in cik_map:
-        return cik_map[clean]
-
-    # Some UK companies use different US tickers
-    # e.g., Shell → SHEL, Unilever → UL, BP → BP
-    return cik_map.get(clean)
+    entry = cik_map.get(clean)
+    if entry:
+        cik, sec_title = entry
+        if _name_matches(sec_title, company_name):
+            return cik
+        log.info(f"  Tier 1 EDGAR: ticker {clean} maps to '{sec_title}' "
+                 f"(CIK {cik}), not '{company_name}' — skipping")
+    return None
 
 
 def _edgar_get(url: str) -> dict | None:
@@ -169,9 +195,9 @@ def extract_financials_from_edgar(
     Returns a list of dicts matching the PCAF extraction schema.
     Returns an empty list if the company doesn't file with SEC.
     """
-    cik = _get_cik(ticker)
+    cik = _get_cik(ticker, company_name)
     if cik is None:
-        log.info(f"  Tier 1 EDGAR: {company_name} ({ticker}) not found in SEC filings")
+        log.info(f"  Tier 1 EDGAR: {company_name} ({ticker}) — no matching SEC filer")
         return []
 
     log.info(f"  Tier 1 EDGAR: found CIK {cik} for {company_name}")
