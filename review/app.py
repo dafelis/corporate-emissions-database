@@ -92,8 +92,9 @@ def _collect_source_ids(records):
     for r in records:
         if r.source_id:
             ids.add(r.source_id)
-        if hasattr(r, "market_data_source_id") and r.market_data_source_id:
-            ids.add(r.market_data_source_id)
+        mkt = getattr(r, "market_data_source_id", None)
+        if mkt:
+            ids.add(mkt)
     return ids
 
 
@@ -490,7 +491,7 @@ def render_data_table():
                     css_class = "approved" if status == "approved" else "not-approved"
                     # Market-derived fields use market_data_source_id
                     if field_name in ("equity_value", "evic"):
-                        mkt_src_id = fin.market_data_source_id if fin else None
+                        mkt_src_id = getattr(fin, "market_data_source_id", None) if fin else None
                         if mkt_src_id:
                             html_parts.append(
                                 f"<td class='{css_class} has-source' "
@@ -1175,7 +1176,7 @@ def render_single_company():
                 src_id = fin.source_id if fin else None
                 if value is not None:
                     if field_name in ("equity_value", "evic"):
-                        mkt_src_id = fin.market_data_source_id if fin else None
+                        mkt_src_id = getattr(fin, "market_data_source_id", None) if fin else None
                         if mkt_src_id:
                             html.append(
                                 f"<td class='has-source' onclick='showSource({mkt_src_id})'>"
