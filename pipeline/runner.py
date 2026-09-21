@@ -1285,6 +1285,7 @@ def _save_api_financial_entries(
 
 def _run_tier1_and_tier2(
     company, company_name, session, fin_covered, target, events=None,
+    run_tier1: bool = True, run_tier2: bool = True,
 ) -> int:
     """Run Tier 1 (XBRL APIs) and Tier 2 (yfinance) for financial data.
 
@@ -1297,7 +1298,7 @@ def _run_tier1_and_tier2(
         return 0
 
     # ── Tier 1a: filings.xbrl.org (UK ESEF/UKSEF) ────────────────────
-    if company.lei:
+    if company.lei and run_tier1:
         log.info(f"  Tier 1 XBRL: searching filings.xbrl.org (LEI {company.lei})")
         try:
             xbrl_entries = extract_financials_from_xbrl(
@@ -1317,7 +1318,7 @@ def _run_tier1_and_tier2(
             log.warning(f"  Tier 1 XBRL: failed: {e}")
 
     # ── Tier 1b: SEC EDGAR (dual-listed / US filers) ─────────────────
-    if company.ticker and fin_missing:
+    if company.ticker and fin_missing and run_tier1:
         log.info(f"  Tier 1 EDGAR: searching SEC filings ({company.ticker})")
         try:
             edgar_entries = extract_financials_from_edgar(
@@ -1337,7 +1338,7 @@ def _run_tier1_and_tier2(
             log.warning(f"  Tier 1 EDGAR: failed: {e}")
 
     # ── Tier 2: yfinance structured data ─────────────────────────────
-    if company.ticker and fin_missing:
+    if company.ticker and fin_missing and run_tier2:
         log.info(f"  Tier 2 yfinance: fetching financial data ({company.ticker})")
         try:
             yf_entries = extract_financials_from_yfinance(
@@ -1507,6 +1508,7 @@ def process_company(
     session,
     skip_emissions: bool = False,
     skip_financial: bool = False,
+    tiers: set[int] | None = None,
 ) -> dict:
     """Process a single company: walk backwards from TARGET_END_YEAR to fill gaps.
 
@@ -1518,13 +1520,16 @@ def process_company(
 
     Returns a dict with status and details.
     """
+    if tiers is None:
+        tiers = {1, 2, 3}
     cost = _new_cost_tracker()
     raw_client = anthropic.Anthropic(api_key=anthropic_key)
     client = _TrackedClient(raw_client, cost)
     company_name = company.name
     events = []
     t_start = time.time()
-    log.info(f"Processing: {company_name}")
+    tier_label = "all" if tiers == {1, 2, 3} else ",".join(str(t) for t in sorted(tiers))
+    log.info(f"Processing: {company_name} (tiers: {tier_label})")
 
     target = _target_years()
     has_industry = company.yfinance_sector is not None
@@ -1606,18 +1611,20 @@ def process_company(
                  f"need data for {sorted(fin_missing)}")
 
         # ── Tier 1 + Tier 2: structured API sources (free, fast, reliable) ──
-        api_saved = _run_tier1_and_tier2(
-            company, company_name, session, fin_covered, target, events=events)
-        total_fin_saved += api_saved
+        if tiers & {1, 2}:
+            api_saved = _run_tier1_and_tier2(
+                company, company_name, session, fin_covered, target,
+                events=events, run_tier1=(1 in tiers), run_tier2=(2 in tiers))
+            total_fin_saved += api_saved
 
-        fin_missing = _get_financial_needs(session, company.id, target)
-        if fin_missing:
-            log.info(f"  After Tier 1+2: still need {sorted(fin_missing)}")
-        else:
-            log.info(f"  Tier 1+2 covered all target years — skipping Tier 3")
+            fin_missing = _get_financial_needs(session, company.id, target)
+            if fin_missing:
+                log.info(f"  After Tier 1+2: still need {sorted(fin_missing)}")
+            else:
+                log.info(f"  Tier 1+2 covered all target years — skipping Tier 3")
 
         # ── Tier 3: Exa search + PDF/HTML extraction (expensive fallback) ──
-        if fin_missing:
+        if fin_missing and 3 in tiers:
             log.info(f"  Tier 3: searching for remaining years {sorted(fin_missing)}")
 
             # Search 1: try a five-year financial summary first
@@ -1797,6 +1804,7 @@ def run_pipeline(
     delay_between: float = 2.0,
     skip_emissions: bool = False,
     skip_financial: bool = False,
+    tiers: set[int] | None = None,
 ):
     """Run the full pipeline across all (or specified) companies."""
     session = get_session(database_url)
@@ -1827,6 +1835,7 @@ def run_pipeline(
             result = process_company(
                 company, anthropic_key, exa_key, llama_key, session,
                 skip_emissions=skip_emissions, skip_financial=skip_financial,
+                tiers=tiers or {1, 2, 3},
             )
             results.append(result)
             cd = result.get("cost_detail", {})

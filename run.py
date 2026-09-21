@@ -247,6 +247,18 @@ def cmd_extract(args):
     skip_emissions = args.financial and not args.emissions
     skip_financial = args.emissions and not args.financial
 
+    # Tier selection: if any --tierN flag is set, run only those tiers.
+    # If none (or --tierall), run all tiers.
+    tiers = set()
+    if args.tier1:
+        tiers.add(1)
+    if args.tier2:
+        tiers.add(2)
+    if args.tier3:
+        tiers.add(3)
+    if not tiers or args.tierall:
+        tiers = {1, 2, 3}
+
     run = run_pipeline(
         database_url=config["DATABASE_URL"],
         anthropic_key=config["ANTHROPIC_API_KEY"],
@@ -256,6 +268,7 @@ def cmd_extract(args):
         delay_between=args.delay,
         skip_emissions=skip_emissions,
         skip_financial=skip_financial,
+        tiers=tiers,
     )
 
     print(f"\nPipeline run complete:")
@@ -413,6 +426,14 @@ def main():
                                 help="Extract emissions data only")
     extract_parser.add_argument("--financial", action="store_true",
                                 help="Extract financial data only")
+    extract_parser.add_argument("--tier1", action="store_true",
+                                help="Financial: run only Tier 1 (XBRL APIs)")
+    extract_parser.add_argument("--tier2", action="store_true",
+                                help="Financial: run only Tier 2 (yfinance)")
+    extract_parser.add_argument("--tier3", action="store_true",
+                                help="Financial: run only Tier 3 (Exa + PDF + LLM)")
+    extract_parser.add_argument("--tierall", action="store_true",
+                                help="Financial: run all tiers (default)")
 
     # check
     subparsers.add_parser("check", help="Run sanity checks")
