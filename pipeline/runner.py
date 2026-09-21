@@ -1404,6 +1404,15 @@ def process_company(
         if fin_records:
             log.info(f"  Fetching market data for {len(fin_records)} financial records...")
             try:
+                yf_source = Source(
+                    company_id=company.id,
+                    url=f"yfinance:{company.ticker}",
+                    title=f"Yahoo Finance market data ({company.ticker})",
+                    document_type="api",
+                )
+                session.add(yf_source)
+                session.flush()
+
                 for fr in fin_records:
                     target_date = fr.fiscal_year_end or date_type(fr.reporting_year, 12, 31)
                     equity_data = get_equity_value_at_date(company.ticker, target_date)
@@ -1413,6 +1422,7 @@ def process_company(
                             fr.shares_outstanding = equity_data["shares_outstanding"]
                         fr.share_price_at_fy_end = equity_data["share_price"]
                         fr.equity_currency = equity_data["currency"]
+                        fr.market_data_source_id = yf_source.id
                         # Legacy enterprise_value
                         if fr.outstanding_debt is not None and fr.cash_and_equivalents is not None:
                             fr.enterprise_value = (

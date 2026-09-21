@@ -165,6 +165,7 @@ class FinancialRecord(Base):
     equity_value = Column(Float)             # market cap at fiscal year-end
     share_price_at_fy_end = Column(Float)
     equity_currency = Column(String(10))
+    market_data_source_id = Column(Integer, ForeignKey("sources.id"))
 
     # ── Calculated ───────────────────────────────────────────────────
     enterprise_value = Column(Float)         # legacy: equity + debt - cash
@@ -187,7 +188,8 @@ class FinancialRecord(Base):
     reviewed_at = Column(DateTime)
 
     company = relationship("Company", backref="financials")
-    source = relationship("Source")
+    source = relationship("Source", foreign_keys=[source_id])
+    market_data_source = relationship("Source", foreign_keys=[market_data_source_id])
 
     __table_args__ = (
         Index("ix_financial_company_year", "company_id", "reporting_year"),

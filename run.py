@@ -135,6 +135,7 @@ def cmd_init(args):
         ("financial_records", "methodology_notes", "TEXT"),
         ("financial_records", "validation_flags", "TEXT"),
         ("financial_records", "extraction_notes", "TEXT"),
+        ("financial_records", "market_data_source_id", "INTEGER REFERENCES sources(id)"),
         # Sources table — preview fields
         ("sources", "screenshot_path", "TEXT"),
         ("sources", "html_snippet", "TEXT"),
@@ -352,7 +353,16 @@ def cmd_reset(args):
             .filter(FinancialRecord.company_id == company.id,
                     FinancialRecord.source_id.isnot(None))
         )
-        referenced_ids = {r[0] for r in referenced_by_emissions} | {r[0] for r in referenced_by_financial}
+        referenced_by_market = (
+            session.query(FinancialRecord.market_data_source_id)
+            .filter(FinancialRecord.company_id == company.id,
+                    FinancialRecord.market_data_source_id.isnot(None))
+        )
+        referenced_ids = (
+            {r[0] for r in referenced_by_emissions}
+            | {r[0] for r in referenced_by_financial}
+            | {r[0] for r in referenced_by_market}
+        )
 
         orphaned = (
             session.query(Source)
