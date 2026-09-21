@@ -47,9 +47,18 @@ def _get_val(df, label, col):
     """Safely get a value from a DataFrame by row label and column."""
     if df is None or df.empty:
         return None
-    if label not in df.index:
-        return None
-    return _safe_float(df.at[label, col])
+    if label in df.index:
+        return _safe_float(df.at[label, col])
+    # yfinance sometimes uses "Title Case With Spaces" instead of CamelCase
+    spaced = label[0]
+    for c in label[1:]:
+        if c.isupper():
+            spaced += " " + c
+        else:
+            spaced += c
+    if spaced in df.index:
+        return _safe_float(df.at[spaced, col])
+    return None
 
 
 def extract_financials_from_yfinance(ticker: str, company_name: str) -> list[dict]:
@@ -73,6 +82,9 @@ def extract_financials_from_yfinance(ticker: str, company_name: str) -> list[dic
     if bs is None or bs.empty:
         log.info(f"  Tier 2: no balance sheet data for {ticker}")
         return []
+
+    log.info(f"  Tier 2: yfinance balance sheet has {len(bs.index)} rows, "
+             f"{len(bs.columns)} periods for {ticker}")
 
     currency = info.get("financialCurrency", "")
     results = []

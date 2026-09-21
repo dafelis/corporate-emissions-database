@@ -43,23 +43,24 @@ _REVENUE_CONCEPTS = {
     "ifrs-full:RevenueFromContractsWithCustomers",
 }
 
-_DEBT_SUM_CONCEPTS = {
-    "ifrs-full:NoncurrentBorrowings",
-    "ifrs-full:CurrentBorrowings",
-}
-
 _DEBT_SINGLE_CONCEPTS = {
     "ifrs-full:Borrowings",
 }
 
-_LEASE_SUM_CONCEPTS = {
-    "ifrs-full:NoncurrentLeaseLiabilities",
-    "ifrs-full:CurrentLeaseLiabilities",
-}
+# Pairs to try in order — sum each pair, take first that works
+_DEBT_SUM_PAIRS = [
+    ("ifrs-full:NoncurrentBorrowings", "ifrs-full:CurrentBorrowings"),
+    ("ifrs-full:LongtermBorrowings", "ifrs-full:ShorttermBorrowings"),
+]
 
 _LEASE_SINGLE_CONCEPTS = {
     "ifrs-full:LeaseLiabilities",
+    "ifrs-full:FinanceLeaseLiabilities",
 }
+
+_LEASE_SUM_PAIRS = [
+    ("ifrs-full:NoncurrentLeaseLiabilities", "ifrs-full:CurrentLeaseLiabilities"),
+]
 
 _NCI_CONCEPTS = {
     "ifrs-full:NoncontrollingInterests",
@@ -111,22 +112,21 @@ def _pick_value(index: dict, concept_set: set[str]) -> float | None:
     return None
 
 
-def _sum_values(index: dict, concept_set: set[str]) -> float | None:
-    """Sum values from multiple concepts (e.g. current + noncurrent borrowings)."""
-    total = 0.0
-    found = False
-    for concept in concept_set:
-        v = _pick_value(index, {concept})
-        if v is not None:
-            total += v
-            found = True
-    return total if found else None
+def _sum_pairs(index: dict, pairs: list[tuple[str, str]]) -> float | None:
+    """Try each (long, short) pair in order; return sum of first pair with any hits."""
+    for a, b in pairs:
+        va = _pick_value(index, {a})
+        vb = _pick_value(index, {b})
+        if va is not None or vb is not None:
+            return (va or 0) + (vb or 0)
+    return None
 
 
 def _detect_currency(index: dict) -> str:
     """Try to detect the reporting currency from fact units."""
     for concept_name in ("ifrs-full:Revenue", "ifrs-full:Borrowings",
-                         "ifrs-full:NoncurrentBorrowings"):
+                         "ifrs-full:NoncurrentBorrowings",
+                         "ifrs-full:LongtermBorrowings"):
         facts = index.get(concept_name, [])
         for f in facts:
             unit = f.get("dimensions", {}).get("unit", "")
@@ -203,15 +203,15 @@ def extract_financials_from_xbrl(
 
         revenue = _pick_value(index, _REVENUE_CONCEPTS)
 
-        # Gross debt: try single concept first, then sum current + noncurrent
+        # Gross debt: try single concept first, then sum current + noncurrent pairs
         gross_debt = _pick_value(index, _DEBT_SINGLE_CONCEPTS)
         if gross_debt is None:
-            gross_debt = _sum_values(index, _DEBT_SUM_CONCEPTS)
+            gross_debt = _sum_pairs(index, _DEBT_SUM_PAIRS)
 
         # Lease liabilities
         lease_liab = _pick_value(index, _LEASE_SINGLE_CONCEPTS)
         if lease_liab is None:
-            lease_liab = _sum_values(index, _LEASE_SUM_CONCEPTS)
+            lease_liab = _sum_pairs(index, _LEASE_SUM_PAIRS)
 
         nci = _pick_value(index, _NCI_CONCEPTS)
         pref = _pick_value(index, _PREF_CONCEPTS)
