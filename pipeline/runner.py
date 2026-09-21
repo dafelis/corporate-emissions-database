@@ -1101,13 +1101,14 @@ def _save_api_financial_entries(
     if not entries:
         return 0
 
-    api_source = Source(
+    # Default source for the batch (used when entries have no per-filing URL)
+    batch_source = Source(
         company_id=company.id,
         url=source_url,
         title=source_title,
         document_type="api",
     )
-    session.add(api_source)
+    session.add(batch_source)
     session.flush()
 
     saved = 0
@@ -1115,6 +1116,20 @@ def _save_api_financial_entries(
         year = entry["reporting_year"]
         if year < TARGET_START_YEAR:
             continue
+
+        # Per-filing source with year-specific viewer URL
+        viewer_url = entry.get("viewer_url")
+        if viewer_url:
+            api_source = Source(
+                company_id=company.id,
+                url=viewer_url,
+                title=f"{source_title} — {year}",
+                document_type="api",
+            )
+            session.add(api_source)
+            session.flush()
+        else:
+            api_source = batch_source
 
         multiplier = entry.get("unit_multiplier", 1) or 1
 

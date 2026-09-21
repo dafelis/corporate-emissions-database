@@ -162,27 +162,29 @@ _SHARES_TAGS = [
 ]
 
 
-def _fetch_first_match(cik: int, tag_list: list[tuple], fy: int) -> float | None:
+def _fetch_first_match(cik: int, tag_list: list[tuple], fy: int) -> tuple[float | None, str | None]:
     """Try each (taxonomy, tag) pair until one returns a value for the given FY."""
     for taxonomy, tag in tag_list:
         entries = _get_concept_values(cik, taxonomy, tag)
         val = _annual_value(entries, fy)
         if val is not None:
-            return val
-    return None
+            return val, f"{taxonomy}:{tag}"
+    return None, None
 
 
-def _fetch_sum(cik: int, tag_list: list[tuple], fy: int) -> float | None:
+def _fetch_sum(cik: int, tag_list: list[tuple], fy: int) -> tuple[float | None, str | None]:
     """Sum values from multiple tags for the given FY."""
     total = 0
     found_any = False
+    matched = []
     for taxonomy, tag in tag_list:
         entries = _get_concept_values(cik, taxonomy, tag)
         val = _annual_value(entries, fy)
         if val is not None:
             total += val
             found_any = True
-    return total if found_any else None
+            matched.append(f"{taxonomy}:{tag}")
+    return (total, " + ".join(matched)) if found_any else (None, None)
 
 
 def extract_financials_from_edgar(
@@ -202,38 +204,46 @@ def extract_financials_from_edgar(
 
     log.info(f"  Tier 1 EDGAR: found CIK {cik} for {company_name}")
 
+    padded_cik = str(cik).zfill(10)
     results = []
     for fy in sorted(target_years):
-        revenue = _fetch_first_match(cik, _REVENUE_TAGS, fy)
+        revenue, rev_tag = _fetch_first_match(cik, _REVENUE_TAGS, fy)
 
         # Gross debt: try combined tag first, then sum components
-        gross_debt = _fetch_first_match(cik, _DEBT_TAGS, fy)
+        gross_debt, debt_tag = _fetch_first_match(cik, _DEBT_TAGS, fy)
         if gross_debt is None:
-            gross_debt = _fetch_sum(cik, _DEBT_COMPONENT_TAGS, fy)
+            gross_debt, debt_tag = _fetch_sum(cik, _DEBT_COMPONENT_TAGS, fy)
 
         # Lease liabilities: sum operating + finance
-        lease_liab = _fetch_sum(cik, _LEASE_TAGS, fy)
+        lease_liab, lease_tag = _fetch_sum(cik, _LEASE_TAGS, fy)
 
-        nci = _fetch_first_match(cik, _NCI_TAGS, fy)
-        pref = _fetch_first_match(cik, _PREF_TAGS, fy)
-        shares = _fetch_first_match(cik, _SHARES_TAGS, fy)
+        nci, nci_tag = _fetch_first_match(cik, _NCI_TAGS, fy)
+        pref, pref_tag = _fetch_first_match(cik, _PREF_TAGS, fy)
+        shares, shares_tag = _fetch_first_match(cik, _SHARES_TAGS, fy)
 
         # Skip if we got nothing
         if all(v is None for v in [revenue, gross_debt, shares]):
             log.info(f"    Tier 1 EDGAR: {fy} — no data")
             continue
 
+        def _edgar_url(tag_str):
+            if not tag_str or "+" in tag_str:
+                return None
+            taxonomy, tag = tag_str.split(":", 1)
+            return f"{_BASE}/companyconcept/CIK{padded_cik}/{taxonomy}/{tag}.json"
+
         entry = {
             "reporting_year": fy,
             "reporting_date": f"{fy}-12-31",
             "currency": "USD",
             "unit_multiplier": 1,
-            "gross_debt": {"value": gross_debt, "components": [], "ref": "SEC EDGAR XBRL", "confidence": "high"},
-            "lease_liabilities": {"value": lease_liab, "label": "OperatingLeaseLiability+FinanceLeaseLiability", "ref": "SEC EDGAR XBRL", "confidence": "high"},
-            "non_controlling_interests": {"value": nci, "label": "MinorityInterest", "ref": "SEC EDGAR XBRL", "confidence": "high"},
-            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": "SEC EDGAR XBRL"},
-            "shares_outstanding": {"value": shares, "share_class": "", "ref": "SEC EDGAR XBRL", "confidence": "high"},
-            "revenue": {"value": revenue, "label": "Revenue", "ref": "SEC EDGAR XBRL", "confidence": "high"},
+            "viewer_url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={padded_cik}&type=10-K&dateb=&owner=include&count=10",
+            "gross_debt": {"value": gross_debt, "components": [], "ref": debt_tag, "confidence": "high", "url": _edgar_url(debt_tag)},
+            "lease_liabilities": {"value": lease_liab, "label": lease_tag, "ref": lease_tag, "confidence": "high", "url": _edgar_url(lease_tag)},
+            "non_controlling_interests": {"value": nci, "label": nci_tag, "ref": nci_tag, "confidence": "high", "url": _edgar_url(nci_tag)},
+            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": pref_tag, "url": _edgar_url(pref_tag)},
+            "shares_outstanding": {"value": shares, "share_class": "", "ref": shares_tag, "confidence": "high", "url": _edgar_url(shares_tag)},
+            "revenue": {"value": revenue, "label": rev_tag, "ref": rev_tag, "confidence": "high", "url": _edgar_url(rev_tag)},
             "is_financial_institution": False,
             "notes": [f"Tier 1: extracted from SEC EDGAR XBRL (CIK {cik})"],
         }

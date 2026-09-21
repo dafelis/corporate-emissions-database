@@ -807,6 +807,13 @@ def render_review():
 
         ccy = _fa("currency") or ""
 
+        def _short_ref(ref):
+            if not ref:
+                return "—"
+            for prefix in ("ifrs-full:", "us-gaap:", "dei:"):
+                ref = ref.replace(prefix, "")
+            return ref
+
         fin_col1, fin_col2 = st.columns(2)
         with fin_col1:
             st.markdown("**PCAF EVIC inputs (from filings):**")
@@ -822,7 +829,7 @@ def render_review():
                 "Metric": [r[0] for r in pcaf_rows],
                 "Value": [_fmt_currency(r[1], ccy) for r in pcaf_rows],
                 "Conf.": [_conf_icon(r[2]) for r in pcaf_rows],
-                "Ref": [r[3] or "—" for r in pcaf_rows],
+                "XBRL concept": [_short_ref(r[3]) for r in pcaf_rows],
             }))
             if _fa("gross_debt_components"):
                 try:

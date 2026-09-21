@@ -93,33 +93,33 @@ def _build_concept_index(facts: dict) -> dict[str, list[dict]]:
     return index
 
 
-def _pick_value(index: dict, concept_set: set[str]) -> float | None:
-    """Return the first numeric value matching any concept in the set.
+def _pick_value(index: dict, concept_set: set[str]) -> tuple[float | None, str | None]:
+    """Return (value, concept_name) for the first numeric match.
 
     Prefers facts with fewer dimensional qualifiers (= consolidated totals).
     """
     for concept in concept_set:
         fact_list = index.get(concept, [])
-        # Sort by dimension count so consolidated totals come first
         for f in sorted(fact_list, key=lambda x: len(x.get("dimensions", {}))):
             val = f.get("value")
             if val is None:
                 continue
             try:
-                return float(val)
+                return float(val), concept
             except (ValueError, TypeError):
                 continue
-    return None
+    return None, None
 
 
-def _sum_pairs(index: dict, pairs: list[tuple[str, str]]) -> float | None:
-    """Try each (long, short) pair in order; return sum of first pair with any hits."""
+def _sum_pairs(index: dict, pairs: list[tuple[str, str]]) -> tuple[float | None, str | None]:
+    """Try each (long, short) pair; return (sum, "conceptA + conceptB") for first hit."""
     for a, b in pairs:
-        va = _pick_value(index, {a})
-        vb = _pick_value(index, {b})
+        va, ca = _pick_value(index, {a})
+        vb, cb = _pick_value(index, {b})
         if va is not None or vb is not None:
-            return (va or 0) + (vb or 0)
-    return None
+            parts = [c for c in [ca, cb] if c]
+            return (va or 0) + (vb or 0), " + ".join(parts)
+    return None, None
 
 
 def _detect_currency(index: dict) -> str:
@@ -201,21 +201,25 @@ def extract_financials_from_xbrl(
         index = _build_concept_index(raw_facts)
         currency = _detect_currency(index)
 
-        revenue = _pick_value(index, _REVENUE_CONCEPTS)
+        # Build a viewer URL for this specific filing
+        filing_dir = json_path.rsplit("/", 1)[0] if "/" in json_path else ""
+        viewer_url = f"{_BASE}{filing_dir}/" if filing_dir else None
+
+        revenue, rev_concept = _pick_value(index, _REVENUE_CONCEPTS)
 
         # Gross debt: try single concept first, then sum current + noncurrent pairs
-        gross_debt = _pick_value(index, _DEBT_SINGLE_CONCEPTS)
+        gross_debt, debt_concept = _pick_value(index, _DEBT_SINGLE_CONCEPTS)
         if gross_debt is None:
-            gross_debt = _sum_pairs(index, _DEBT_SUM_PAIRS)
+            gross_debt, debt_concept = _sum_pairs(index, _DEBT_SUM_PAIRS)
 
         # Lease liabilities
-        lease_liab = _pick_value(index, _LEASE_SINGLE_CONCEPTS)
+        lease_liab, lease_concept = _pick_value(index, _LEASE_SINGLE_CONCEPTS)
         if lease_liab is None:
-            lease_liab = _sum_pairs(index, _LEASE_SUM_PAIRS)
+            lease_liab, lease_concept = _sum_pairs(index, _LEASE_SUM_PAIRS)
 
-        nci = _pick_value(index, _NCI_CONCEPTS)
-        pref = _pick_value(index, _PREF_CONCEPTS)
-        shares = _pick_value(index, _SHARES_CONCEPTS)
+        nci, nci_concept = _pick_value(index, _NCI_CONCEPTS)
+        pref, pref_concept = _pick_value(index, _PREF_CONCEPTS)
+        shares, shares_concept = _pick_value(index, _SHARES_CONCEPTS)
 
         if all(v is None for v in [revenue, gross_debt, shares]):
             log.info(f"    Tier 1 XBRL: {fy} — no PCAF fields found in "
@@ -227,12 +231,13 @@ def extract_financials_from_xbrl(
             "reporting_date": period_end[:10],
             "currency": currency,
             "unit_multiplier": 1,
-            "gross_debt": {"value": gross_debt, "components": [], "ref": "XBRL IFRS", "confidence": "high"},
-            "lease_liabilities": {"value": lease_liab, "label": "LeaseLiabilities", "ref": "XBRL IFRS", "confidence": "high"},
-            "non_controlling_interests": {"value": nci, "label": "NoncontrollingInterests", "ref": "XBRL IFRS", "confidence": "high"},
-            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": "XBRL IFRS"},
-            "shares_outstanding": {"value": shares, "share_class": "", "ref": "XBRL IFRS", "confidence": "high"},
-            "revenue": {"value": revenue, "label": "Revenue", "ref": "XBRL IFRS", "confidence": "high"},
+            "viewer_url": viewer_url,
+            "gross_debt": {"value": gross_debt, "components": [], "ref": debt_concept, "confidence": "high"},
+            "lease_liabilities": {"value": lease_liab, "label": lease_concept, "ref": lease_concept, "confidence": "high"},
+            "non_controlling_interests": {"value": nci, "label": nci_concept, "ref": nci_concept, "confidence": "high"},
+            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": pref_concept},
+            "shares_outstanding": {"value": shares, "share_class": "", "ref": shares_concept, "confidence": "high"},
+            "revenue": {"value": revenue, "label": rev_concept, "ref": rev_concept, "confidence": "high"},
             "is_financial_institution": False,
             "notes": [f"Tier 1: extracted from XBRL IFRS filing (LEI {lei})"],
         }
