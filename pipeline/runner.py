@@ -1306,7 +1306,7 @@ def _run_tier1_and_tier2(
             if xbrl_entries:
                 saved = _save_api_financial_entries(
                     xbrl_entries, company, session, fin_covered,
-                    source_url=f"xbrl:{company.lei}",
+                    source_url=f"https://filings.xbrl.org/{company.lei}/",
                     source_title=f"XBRL IFRS filing ({company.lei})",
                     tier=1, events=events,
                 )
@@ -1324,9 +1324,10 @@ def _run_tier1_and_tier2(
             edgar_entries = extract_financials_from_edgar(
                 company.ticker, company_name, fin_missing)
             if edgar_entries:
+                ticker_clean = company.ticker.upper().replace(".L", "")
                 saved = _save_api_financial_entries(
                     edgar_entries, company, session, fin_covered,
-                    source_url=f"edgar:{company.ticker}",
+                    source_url=f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company={ticker_clean}&type=10-K&output=atom",
                     source_title=f"SEC EDGAR XBRL ({company.ticker})",
                     tier=1, events=events,
                 )
@@ -1350,7 +1351,7 @@ def _run_tier1_and_tier2(
                 if yf_filtered:
                     saved = _save_api_financial_entries(
                         yf_filtered, company, session, fin_covered,
-                        source_url=f"yfinance:{company.ticker}",
+                        source_url=f"https://finance.yahoo.com/quote/{company.ticker}/financials/",
                         source_title=f"Yahoo Finance ({company.ticker})",
                         tier=2, events=events,
                     )
