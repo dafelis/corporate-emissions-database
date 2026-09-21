@@ -10,19 +10,19 @@ import anthropic
 _FIELD_WITH_REF = {
     "type": "object",
     "properties": {
-        "value": {"type": "number", "description": "Extracted numeric value, or null if not found"},
+        "value": {"type": ["number", "null"], "description": "Extracted numeric value, or null if not found"},
         "label": {"type": "string", "description": "Label as printed in the source document"},
         "ref": {"type": "string", "description": "Page number where the value was found, e.g. 'p.42'"},
         "confidence": {"type": "string", "description": "high, medium, or low"},
     },
-    "required": ["value"],
+    "required": ["value", "label", "ref", "confidence"],
     "additionalProperties": False,
 }
 
 _DEBT_FIELD = {
     "type": "object",
     "properties": {
-        "value": {"type": "number", "description": "Gross debt total, or null"},
+        "value": {"type": ["number", "null"], "description": "Gross debt total, or null if not found"},
         "components": {
             "type": "array",
             "items": {"type": "string"},
@@ -31,31 +31,31 @@ _DEBT_FIELD = {
         "ref": {"type": "string", "description": "Page number(s)"},
         "confidence": {"type": "string", "description": "high, medium, or low"},
     },
-    "required": ["value"],
+    "required": ["value", "components", "ref", "confidence"],
     "additionalProperties": False,
 }
 
 _PREF_SHARES_FIELD = {
     "type": "object",
     "properties": {
-        "value": {"type": "number", "description": "Preference share value, or null"},
+        "value": {"type": ["number", "null"], "description": "Preference share value, or null if not found"},
         "classification": {"type": "string", "description": "equity or liability"},
-        "listed": {"type": "boolean", "description": "Are the preference shares listed?"},
+        "listed": {"type": ["boolean", "null"], "description": "Are the preference shares listed? null if unknown"},
         "ref": {"type": "string"},
     },
-    "required": ["value"],
+    "required": ["value", "classification", "listed", "ref"],
     "additionalProperties": False,
 }
 
 _SHARES_FIELD = {
     "type": "object",
     "properties": {
-        "value": {"type": "number", "description": "Shares outstanding net of treasury"},
-        "share_class": {"type": "string", "description": "Share class if multiple"},
+        "value": {"type": ["number", "null"], "description": "Shares outstanding net of treasury, or null"},
+        "share_class": {"type": "string", "description": "Share class if multiple, or empty string"},
         "ref": {"type": "string"},
         "confidence": {"type": "string"},
     },
-    "required": ["value"],
+    "required": ["value", "share_class", "ref", "confidence"],
     "additionalProperties": False,
 }
 
@@ -98,7 +98,11 @@ FINANCIAL_SCHEMA = {
                         "description": "Judgement calls, restatements, policy changes",
                     },
                 },
-                "required": ["reporting_year"],
+                "required": [
+                    "reporting_year", "reporting_date", "currency",
+                    "unit_multiplier", "gross_debt", "revenue",
+                    "is_financial_institution", "notes",
+                ],
                 "additionalProperties": False,
             },
             "description": "One entry per reporting year found in the document.",
