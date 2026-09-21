@@ -87,8 +87,14 @@ def log_review(record_obj, record_type, old_status, new_status, notes="", field_
 # ════════════════════════════════════════════════════════════════════════
 
 def _collect_source_ids(records):
-    """Return the set of non-null source_id values from a list of ORM records."""
-    return {r.source_id for r in records if r.source_id}
+    """Return the set of non-null source_id and market_data_source_id values."""
+    ids = set()
+    for r in records:
+        if r.source_id:
+            ids.add(r.source_id)
+        if hasattr(r, "market_data_source_id") and r.market_data_source_id:
+            ids.add(r.market_data_source_id)
+    return ids
 
 
 def _build_source_data(session_obj, source_ids, include_screenshots=False):
@@ -325,10 +331,9 @@ def render_data_table():
     ]
     fin_fields = [
         ("Revenue", "revenue", "financial"),
-        ("Debt", "outstanding_debt", "financial"),
-        ("Cash", "cash_and_equivalents", "financial"),
+        ("Gross Debt", "gross_debt", "financial"),
         ("Equity", "equity_value", "financial"),
-        ("EV", "enterprise_value", "financial"),
+        ("EVIC", "evic", "financial"),
     ]
 
     fields = []
@@ -483,12 +488,16 @@ def render_data_table():
 
                 if value is not None:
                     css_class = "approved" if status == "approved" else "not-approved"
-                    # Make clickable if source is available
-                    if field_name in ("equity_value", "enterprise_value"):
-                        html_parts.append(
-                            f"<td class='{css_class} has-source' "
-                            f"onclick='showYfinance()'>{fmt_num(value)}</td>"
-                        )
+                    # Market-derived fields use market_data_source_id
+                    if field_name in ("equity_value", "evic"):
+                        mkt_src_id = fin.market_data_source_id if fin else None
+                        if mkt_src_id:
+                            html_parts.append(
+                                f"<td class='{css_class} has-source' "
+                                f"onclick='showSource({mkt_src_id})'>{fmt_num(value)}</td>"
+                            )
+                        else:
+                            html_parts.append(f"<td class='{css_class}'>{fmt_num(value)}</td>")
                     elif src_id:
                         html_parts.append(
                             f"<td class='{css_class} has-source' "
@@ -561,11 +570,15 @@ def render_data_table():
             if fin:
                 row["Financial Status"] = fin.review_status
                 row["Revenue"] = fin.revenue
-                row["Outstanding Debt"] = fin.outstanding_debt
-                row["Cash & Equivalents"] = fin.cash_and_equivalents
+                row["Gross Debt"] = fin.gross_debt
+                row["Lease Liabilities"] = fin.lease_liabilities
+                row["NCI"] = fin.non_controlling_interests
+                row["Preference Shares"] = fin.preference_shares
+                row["Shares Outstanding"] = fin.shares_outstanding
                 row["Equity Value"] = fin.equity_value
-                row["Enterprise Value"] = fin.enterprise_value
+                row["EVIC"] = fin.evic
                 row["Currency"] = fin.currency
+                row["Source Tier"] = fin.source_tier
                 if fin.period_start and fin.period_end:
                     row["Financial Period"] = f"{fin.period_start} to {fin.period_end}"
                 fin_source = session.query(Source).get(fin.source_id) if fin.source_id else None
@@ -760,7 +773,9 @@ def render_review():
 
     if fin_record:
         st.markdown("---")
-        st.subheader("Financial Data")
+        tier_label = {1: "Tier 1 (XBRL API)", 2: "Tier 2 (yfinance)", 3: "Tier 3 (PDF/LLM)"}.get(
+            fin_record.source_tier, "Unknown")
+        st.subheader(f"Financial Data — {tier_label}")
         if fin_record.period_start and fin_record.period_end:
             st.caption(f"📅 Financial period: {fin_record.period_start.strftime('%d %b %Y')} – {fin_record.period_end.strftime('%d %b %Y')}")
         elif fin_record.fiscal_year_end:
@@ -776,28 +791,72 @@ def render_review():
                 return f"{prefix}{value / 1_000_000:,.1f}m"
             return f"{prefix}{value:,.0f}"
 
+        def _conf_icon(conf):
+            if conf == "high":
+                return "🟢"
+            if conf == "medium":
+                return "🟡"
+            if conf == "low":
+                return "🔴"
+            return ""
+
+        ccy = fin_record.currency or ""
+
         fin_col1, fin_col2 = st.columns(2)
         with fin_col1:
-            st.markdown("**From company report:**")
+            st.markdown("**PCAF EVIC inputs (from filings):**")
+            pcaf_rows = [
+                ("Revenue", fin_record.revenue, fin_record.revenue_confidence, fin_record.revenue_ref),
+                ("Gross debt", fin_record.gross_debt, fin_record.gross_debt_confidence, fin_record.gross_debt_ref),
+                ("Lease liabilities", fin_record.lease_liabilities, fin_record.lease_liabilities_confidence, fin_record.lease_liabilities_ref),
+                ("Non-controlling interests", fin_record.non_controlling_interests, fin_record.nci_confidence, fin_record.nci_ref),
+                ("Preference shares", fin_record.preference_shares, None, fin_record.preference_shares_ref),
+                ("Shares outstanding", fin_record.shares_outstanding, fin_record.shares_outstanding_confidence, fin_record.shares_outstanding_ref),
+            ]
             st.table(pd.DataFrame({
-                "Metric": ["Revenue", "Outstanding debt", "Cash & equivalents"],
-                "Value": [
-                    _fmt_currency(fin_record.revenue, fin_record.currency),
-                    _fmt_currency(fin_record.outstanding_debt, fin_record.currency),
-                    _fmt_currency(fin_record.cash_and_equivalents, fin_record.currency),
-                ],
+                "Metric": [r[0] for r in pcaf_rows],
+                "Value": [_fmt_currency(r[1], ccy) for r in pcaf_rows],
+                "Conf.": [_conf_icon(r[2]) for r in pcaf_rows],
+                "Ref": [r[3] or "—" for r in pcaf_rows],
             }))
+            if fin_record.gross_debt_components:
+                try:
+                    components_list = json.loads(fin_record.gross_debt_components)
+                    if components_list:
+                        st.caption(f"Debt components: {', '.join(components_list)}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if fin_record.is_financial_institution:
+                st.warning("Classified as financial institution (bank/insurer/asset manager)")
+
         with fin_col2:
-            st.markdown("**Market data:**")
+            st.markdown("**Market data + EVIC:**")
             st.table(pd.DataFrame({
-                "Metric": ["Equity value (market cap)", "Enterprise value"],
+                "Metric": ["Equity value (market cap)", "EVIC"],
                 "Value": [
                     _fmt_currency(fin_record.equity_value, fin_record.equity_currency),
-                    _fmt_currency(fin_record.enterprise_value, fin_record.equity_currency),
+                    _fmt_currency(fin_record.evic, fin_record.equity_currency or ccy),
                 ],
             }))
             if fin_record.fiscal_year_end:
                 st.caption(f"As at fiscal year-end: {fin_record.fiscal_year_end}")
+            if fin_record.evic and fin_record.equity_value:
+                debt_part = (fin_record.gross_debt or 0)
+                nci_part = (fin_record.non_controlling_interests or 0)
+                pref_part = (fin_record.preference_shares or 0)
+                st.caption(
+                    f"EVIC = {_fmt_currency(fin_record.equity_value)} (equity) "
+                    f"+ {_fmt_currency(debt_part)} (debt) "
+                    f"+ {_fmt_currency(nci_part)} (NCI) "
+                    f"+ {_fmt_currency(pref_part)} (pref)"
+                )
+            if fin_record.validation_flags:
+                try:
+                    flags = json.loads(fin_record.validation_flags)
+                    if flags:
+                        st.warning(f"Validation flags: {', '.join(flags)}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         # Financial source info
         fin_source = fin_record.source if fin_record.source_id else None
@@ -810,7 +869,6 @@ def render_review():
             if fin_source.page_number is not None:
                 st.caption(f"Page: {fin_source.page_number + 1}")
 
-            # Financial source preview
             if fin_source.screenshot_path and os.path.exists(fin_source.screenshot_path):
                 st.markdown("**Financial source table (PDF screenshot):**")
                 st.image(fin_source.screenshot_path, use_container_width=True)
@@ -1019,10 +1077,14 @@ def render_single_company():
         ("S2 mkt", "scope_2_market", "emissions"),
         ("S3", "scope_3", "emissions"),
         ("Revenue", "revenue", "financial"),
-        ("Debt", "outstanding_debt", "financial"),
-        ("Cash", "cash_and_equivalents", "financial"),
+        ("Gross Debt", "gross_debt", "financial"),
+        ("Lease Liab.", "lease_liabilities", "financial"),
+        ("NCI", "non_controlling_interests", "financial"),
+        ("Pref Shares", "preference_shares", "financial"),
+        ("Shares Out", "shares_outstanding", "financial"),
         ("Equity", "equity_value", "financial"),
-        ("EV", "enterprise_value", "financial"),
+        ("EVIC", "evic", "financial"),
+        ("Tier", "source_tier", "financial"),
         ("Em. Basis", "_em_basis", "basis"),
         ("Fin. Basis", "_fin_basis", "basis"),
     ]
@@ -1112,11 +1174,17 @@ def render_single_company():
                 value = getattr(fin, field_name, None) if fin else None
                 src_id = fin.source_id if fin else None
                 if value is not None:
-                    if field_name in ("equity_value", "enterprise_value"):
-                        html.append(
-                            f"<td class='has-source' onclick='showYfinance()'>"
-                            f"{fmt(value)}</td>"
-                        )
+                    if field_name in ("equity_value", "evic"):
+                        mkt_src_id = fin.market_data_source_id if fin else None
+                        if mkt_src_id:
+                            html.append(
+                                f"<td class='has-source' onclick='showSource({mkt_src_id})'>"
+                                f"{fmt(value)}</td>"
+                            )
+                        else:
+                            html.append(f"<td>{fmt(value)}</td>")
+                    elif field_name == "source_tier":
+                        html.append(f"<td style='text-align:center'>{int(value)}</td>")
                     elif src_id:
                         html.append(
                             f"<td class='has-source' onclick='showSource({src_id})'>"
@@ -1150,10 +1218,14 @@ def render_single_company():
             "S2 mkt": fmt(em.scope_2_market) if em else "—",
             "S3": fmt(em.scope_3) if em else "—",
             "Revenue": fmt(fin.revenue) if fin else "—",
-            "Debt": fmt(fin.outstanding_debt) if fin else "—",
-            "Cash": fmt(fin.cash_and_equivalents) if fin else "—",
+            "Gross Debt": fmt(fin.gross_debt) if fin else "—",
+            "Lease Liab.": fmt(fin.lease_liabilities) if fin else "—",
+            "NCI": fmt(fin.non_controlling_interests) if fin else "—",
+            "Pref Shares": fmt(fin.preference_shares) if fin else "—",
+            "Shares Out": fmt(fin.shares_outstanding) if fin else "—",
             "Equity": fmt(fin.equity_value) if fin else "—",
-            "EV": fmt(fin.enterprise_value) if fin else "—",
+            "EVIC": fmt(fin.evic) if fin else "—",
+            "Tier": fin.source_tier if fin else "—",
             "Em. Basis": record_basis(em),
             "Fin. Basis": record_basis(fin),
         })
