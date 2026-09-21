@@ -67,6 +67,84 @@ def _terminate_other_connections(database_url: str):
         print("  If init hangs, manually run: sudo -u postgres psql -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'emissions' AND pid <> pg_backend_pid();\"")
 
 
+_MIGRATIONS = [
+    # Companies table — LEI fields
+    ("companies", "lei_legal_name", "VARCHAR(500)"),
+    ("companies", "lei_country", "VARCHAR(10)"),
+    ("companies", "lei_confidence", "VARCHAR(20)"),
+    ("companies", "lei_flag_reason", "TEXT"),
+    ("companies", "lei_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+    # Companies table — industry classification
+    ("companies", "yfinance_sector", "VARCHAR(200)"),
+    ("companies", "yfinance_industry", "VARCHAR(200)"),
+    ("companies", "sic_code", "VARCHAR(20)"),
+    ("companies", "sic_description", "VARCHAR(500)"),
+    ("companies", "naics_code", "VARCHAR(20)"),
+    ("companies", "naics_description", "VARCHAR(500)"),
+    ("companies", "nace_code", "VARCHAR(20)"),
+    ("companies", "nace_description", "VARCHAR(500)"),
+    ("companies", "industry_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+    # Emissions table — reporting period
+    ("emissions_records", "period_start", "DATE"),
+    ("emissions_records", "period_end", "DATE"),
+    # Financial table — reporting period
+    ("financial_records", "period_start", "DATE"),
+    ("financial_records", "period_end", "DATE"),
+    # Financial table — PCAF EVIC fields
+    ("financial_records", "units", "VARCHAR(20)"),
+    ("financial_records", "gross_debt", "DOUBLE PRECISION"),
+    ("financial_records", "gross_debt_components", "TEXT"),
+    ("financial_records", "gross_debt_ref", "TEXT"),
+    ("financial_records", "gross_debt_confidence", "VARCHAR(10)"),
+    ("financial_records", "lease_liabilities", "DOUBLE PRECISION"),
+    ("financial_records", "lease_liabilities_ref", "TEXT"),
+    ("financial_records", "lease_liabilities_confidence", "VARCHAR(10)"),
+    ("financial_records", "non_controlling_interests", "DOUBLE PRECISION"),
+    ("financial_records", "nci_ref", "TEXT"),
+    ("financial_records", "nci_confidence", "VARCHAR(10)"),
+    ("financial_records", "preference_shares", "DOUBLE PRECISION"),
+    ("financial_records", "preference_shares_classification", "VARCHAR(20)"),
+    ("financial_records", "preference_shares_listed", "BOOLEAN"),
+    ("financial_records", "preference_shares_ref", "TEXT"),
+    ("financial_records", "shares_outstanding_share_class", "VARCHAR(100)"),
+    ("financial_records", "shares_outstanding_ref", "TEXT"),
+    ("financial_records", "shares_outstanding_confidence", "VARCHAR(10)"),
+    ("financial_records", "revenue_label", "VARCHAR(200)"),
+    ("financial_records", "revenue_ref", "TEXT"),
+    ("financial_records", "revenue_confidence", "VARCHAR(10)"),
+    ("financial_records", "is_financial_institution", "BOOLEAN"),
+    ("financial_records", "evic", "DOUBLE PRECISION"),
+    ("financial_records", "source_tier", "INTEGER"),
+    ("financial_records", "source_type", "VARCHAR(50)"),
+    ("financial_records", "methodology_notes", "TEXT"),
+    ("financial_records", "validation_flags", "TEXT"),
+    ("financial_records", "extraction_notes", "TEXT"),
+    ("financial_records", "market_data_source_id", "INTEGER REFERENCES sources(id)"),
+    # Sources table — preview fields
+    ("sources", "screenshot_path", "TEXT"),
+    ("sources", "html_snippet", "TEXT"),
+]
+
+
+def _run_migrations(database_url):
+    from sqlalchemy import text
+    from db.models import get_engine
+
+    engine = get_engine(database_url)
+    added = 0
+    for table, col, coltype in _MIGRATIONS:
+        with engine.connect() as conn:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}"))
+                conn.commit()
+                print(f"  Added column: {col}")
+                added += 1
+            except Exception:
+                conn.rollback()
+    if added:
+        print(f"  {added} new column(s) added")
+
+
 def cmd_init(args):
     """Initialise the database and load FTSE 100 companies with LEI lookup."""
     config = get_config()
@@ -79,75 +157,7 @@ def cmd_init(args):
     _terminate_other_connections(config["DATABASE_URL"])
     create_tables(config["DATABASE_URL"])
 
-    # Add new LEI columns if they don't exist (migration for existing databases)
-    from sqlalchemy import text
-    from db.models import get_engine
-    engine = get_engine(config["DATABASE_URL"])
-    migrations = [
-        # Companies table — LEI fields
-        ("companies", "lei_legal_name", "VARCHAR(500)"),
-        ("companies", "lei_country", "VARCHAR(10)"),
-        ("companies", "lei_confidence", "VARCHAR(20)"),
-        ("companies", "lei_flag_reason", "TEXT"),
-        ("companies", "lei_review_status", "VARCHAR(20) DEFAULT 'pending'"),
-        # Companies table — industry classification
-        ("companies", "yfinance_sector", "VARCHAR(200)"),
-        ("companies", "yfinance_industry", "VARCHAR(200)"),
-        ("companies", "sic_code", "VARCHAR(20)"),
-        ("companies", "sic_description", "VARCHAR(500)"),
-        ("companies", "naics_code", "VARCHAR(20)"),
-        ("companies", "naics_description", "VARCHAR(500)"),
-        ("companies", "nace_code", "VARCHAR(20)"),
-        ("companies", "nace_description", "VARCHAR(500)"),
-        ("companies", "industry_review_status", "VARCHAR(20) DEFAULT 'pending'"),
-        # Emissions table — reporting period
-        ("emissions_records", "period_start", "DATE"),
-        ("emissions_records", "period_end", "DATE"),
-        # Financial table — reporting period
-        ("financial_records", "period_start", "DATE"),
-        ("financial_records", "period_end", "DATE"),
-        # Financial table — PCAF EVIC fields
-        ("financial_records", "units", "VARCHAR(20)"),
-        ("financial_records", "gross_debt", "DOUBLE PRECISION"),
-        ("financial_records", "gross_debt_components", "TEXT"),
-        ("financial_records", "gross_debt_ref", "TEXT"),
-        ("financial_records", "gross_debt_confidence", "VARCHAR(10)"),
-        ("financial_records", "lease_liabilities", "DOUBLE PRECISION"),
-        ("financial_records", "lease_liabilities_ref", "TEXT"),
-        ("financial_records", "lease_liabilities_confidence", "VARCHAR(10)"),
-        ("financial_records", "non_controlling_interests", "DOUBLE PRECISION"),
-        ("financial_records", "nci_ref", "TEXT"),
-        ("financial_records", "nci_confidence", "VARCHAR(10)"),
-        ("financial_records", "preference_shares", "DOUBLE PRECISION"),
-        ("financial_records", "preference_shares_classification", "VARCHAR(20)"),
-        ("financial_records", "preference_shares_listed", "BOOLEAN"),
-        ("financial_records", "preference_shares_ref", "TEXT"),
-        ("financial_records", "shares_outstanding_share_class", "VARCHAR(100)"),
-        ("financial_records", "shares_outstanding_ref", "TEXT"),
-        ("financial_records", "shares_outstanding_confidence", "VARCHAR(10)"),
-        ("financial_records", "revenue_label", "VARCHAR(200)"),
-        ("financial_records", "revenue_ref", "TEXT"),
-        ("financial_records", "revenue_confidence", "VARCHAR(10)"),
-        ("financial_records", "is_financial_institution", "BOOLEAN"),
-        ("financial_records", "evic", "DOUBLE PRECISION"),
-        ("financial_records", "source_tier", "INTEGER"),
-        ("financial_records", "source_type", "VARCHAR(50)"),
-        ("financial_records", "methodology_notes", "TEXT"),
-        ("financial_records", "validation_flags", "TEXT"),
-        ("financial_records", "extraction_notes", "TEXT"),
-        ("financial_records", "market_data_source_id", "INTEGER REFERENCES sources(id)"),
-        # Sources table — preview fields
-        ("sources", "screenshot_path", "TEXT"),
-        ("sources", "html_snippet", "TEXT"),
-    ]
-    for table, col, coltype in migrations:
-        with engine.connect() as conn:
-            try:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}"))
-                conn.commit()
-                print(f"  Added column: {col}")
-            except Exception:
-                conn.rollback()  # column already exists
+    _run_migrations(config["DATABASE_URL"])
 
     session = get_session(config["DATABASE_URL"])
     existing = {c.name for c in session.query(Company).all()}
@@ -226,6 +236,8 @@ def cmd_extract(args):
     """Run the extraction pipeline."""
     config = get_config()
 
+    _run_migrations(config["DATABASE_URL"])
+
     from pipeline.runner import run_pipeline
 
     company_ids = [args.id] if args.id else None
@@ -303,9 +315,9 @@ def cmd_reset(args):
     """
     config = get_config()
 
-    from sqlalchemy import and_
     from db.models import get_session, Company, EmissionsRecord, FinancialRecord, Source
 
+    _run_migrations(config["DATABASE_URL"])
     session = get_session(config["DATABASE_URL"])
 
     if args.id:
