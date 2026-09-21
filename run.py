@@ -130,6 +130,7 @@ def _run_migrations(database_url):
     from sqlalchemy import text
     from db.models import get_engine
 
+    _terminate_other_connections(database_url)
     engine = get_engine(database_url)
     added = 0
     for table, col, coltype in _MIGRATIONS:
