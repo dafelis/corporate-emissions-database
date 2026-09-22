@@ -128,7 +128,7 @@ def _build_provenance_data(financial_records):
                 use_id = src_id
             if not use_id:
                 continue
-            key = f"{use_id}:{field}"
+            key = f"{use_id}:{field}:{fin.reporting_year}"
             entry = {
                 "lei": lei,
                 "entity_name": entity_name,
@@ -153,9 +153,9 @@ def _build_provenance_data(financial_records):
                         continue
                     concept_lower = comp.get("concept", "").lower()
                     if any(kw in concept_lower for kw in ("noncurrent", "longterm", "long_term")):
-                        comp_key = f"{use_id}:_debt_lt"
+                        comp_key = f"{use_id}:_debt_lt:{fin.reporting_year}"
                     elif any(kw in concept_lower for kw in ("current", "shortterm", "short_term")):
-                        comp_key = f"{use_id}:_debt_st"
+                        comp_key = f"{use_id}:_debt_st:{fin.reporting_year}"
                     else:
                         continue
                     prov_data[comp_key] = {
@@ -306,7 +306,7 @@ function fmtPeriod(p){
     var parts=p.replace(/T00:00:00/g,'').split('/');
     return parts.join(' to ');
 }
-function showSource(sid,field){
+function showSource(sid,field,yr){
     var s=SOURCES[String(sid)]; if(!s) return;
     var h='<div class="src-title">📄 '+esc(s.title)+'</div>';
     h+='<div class="src-meta">Type: '+esc(s.type);
@@ -315,7 +315,7 @@ function showSource(sid,field){
     if(s.url) h+='<div class="src-link"><a href="'+esc(s.url)+'" target="_blank" rel="noopener">Open source document ↗</a></div>';
     // Show provenance details for Tier 1/2 financial fields
     if(field){
-        var pk=String(sid)+':'+field;
+        var pk=String(sid)+':'+field+(yr?':'+yr:'');
         var pv=PROVENANCE[pk];
         if(pv){
             if(pv.calculated && pv.components && pv.components.length>0){
@@ -678,7 +678,7 @@ def render_data_table():
                     if src_id:
                         html_parts.append(
                             f"<td class='{css_class} has-source' "
-                            f"onclick=\"showSource({src_id},'{field_name}')\">{fmt_num(value)}</td>"
+                            f"onclick=\"showSource({src_id},'{field_name}',{year})\">{fmt_num(value)}</td>"
                         )
                     else:
                         html_parts.append(f"<td class='{css_class}'>{fmt_num(value)}</td>")
@@ -1367,7 +1367,7 @@ def render_single_company():
         for flabel, fname, use_sid in fin_fields_to_check:
             if not use_sid or not prov_data:
                 continue
-            pk = f"{use_sid}:{fname}"
+            pk = f"{use_sid}:{fname}:{yr}"
             pv = prov_data.get(pk)
             if pv and pv.get("period"):
                 field_periods[flabel] = pv["period"]
@@ -1516,7 +1516,7 @@ def render_single_company():
                 src_id = fin.source_id if fin else None
                 if value is not None and src_id:
                     html.append(
-                        f"<td class='has-source' onclick=\"showSource({src_id},'{field_name}')\">"
+                        f"<td class='has-source' onclick=\"showSource({src_id},'{field_name}',{year})\">"
                         f"{fmt(value)}</td>"
                     )
                 elif value is not None:
@@ -1532,7 +1532,7 @@ def render_single_company():
                 if value is not None:
                     if mkt_src_id:
                         html.append(
-                            f"<td class='has-source' onclick=\"showSource({mkt_src_id},'{field_name}')\">"
+                            f"<td class='has-source' onclick=\"showSource({mkt_src_id},'{field_name}',{year})\">"
                             f"{fmt(value)}{mkt_calc}</td>"
                         )
                     else:
@@ -1545,7 +1545,7 @@ def render_single_company():
                 # Check if this field is calculated (from provenance)
                 is_calc = False
                 if fin and src_id and provenance_data:
-                    pk = f"{src_id}:{field_name}"
+                    pk = f"{src_id}:{field_name}:{year}"
                     fp = provenance_data.get(pk)
                     if fp and fp.get("calculated"):
                         is_calc = True
@@ -1556,7 +1556,7 @@ def render_single_company():
                         html.append(f"<td style='text-align:center'>{int(value)}</td>")
                     elif src_id:
                         html.append(
-                            f"<td class='has-source' onclick=\"showSource({src_id},'{field_name}')\">"
+                            f"<td class='has-source' onclick=\"showSource({src_id},'{field_name}',{year})\">"
                             f"{fmt(value)}{calc_badge}</td>"
                         )
                     else:

@@ -1769,11 +1769,8 @@ def process_company(
 
                 for fr in fin_records:
                     target_date = fr.fiscal_year_end or date_type(fr.reporting_year, 12, 31)
-                    log.info(f"    {fr.reporting_year}: target_date={target_date} (fye={fr.fiscal_year_end})")
                     equity_data = get_equity_value_at_date(company.ticker, target_date)
                     if equity_data:
-                        log.info(f"    {fr.reporting_year}: price_date={equity_data.get('price_date')} "
-                                 f"type={type(equity_data.get('price_date'))}")
                         fr.equity_value = equity_data["market_cap"]
                         if fr.shares_outstanding is None:
                             fr.shares_outstanding = equity_data["shares_outstanding"]
@@ -1787,7 +1784,6 @@ def process_company(
                             notes_data = {}
                         prov = notes_data.get("provenance", {})
                         actual_date = equity_data.get("price_date", target_date)
-                        log.info(f"    {fr.reporting_year}: storing period={actual_date}")
                         prov["equity_value"] = {
                             "concept": "market_cap",
                             "value": equity_data["market_cap"],
