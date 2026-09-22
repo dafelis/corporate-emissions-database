@@ -152,6 +152,22 @@ def _capture_source_preview(url, source_type, table_dicts, matched_table_idx, co
     return screenshot_path, html_snippet, page_number, s3_pdf_key
 
 
+_YFINANCE_EXCHANGE_MAP = {
+    ".L": "LON", ".AS": "AMS", ".PA": "EPA", ".DE": "ETR",
+    ".MI": "BIT", ".MC": "BME", ".SW": "SWX", ".TO": "TSE",
+    ".AX": "ASX", ".HK": "HKG", ".SI": "SGX", ".NS": "NSE",
+}
+
+
+def _google_finance_url(ticker: str) -> str:
+    """Convert a yfinance ticker to a Google Finance URL."""
+    for suffix, exchange in _YFINANCE_EXCHANGE_MAP.items():
+        if ticker.upper().endswith(suffix.upper()):
+            symbol = ticker[:-len(suffix)]
+            return f"https://www.google.com/finance/quote/{symbol}:{exchange}"
+    return f"https://www.google.com/finance/quote/{ticker}"
+
+
 def _parse_date(date_str):
     """Safely parse a YYYY-MM-DD string to a date, or return None."""
     if not date_str:
@@ -1384,7 +1400,7 @@ def _run_tier1_and_tier2(
                 if yf_filtered:
                     saved = _save_api_financial_entries(
                         yf_filtered, company, session, fin_covered,
-                        source_url=f"https://finance.yahoo.com/quote/{company.ticker}/financials",
+                        source_url=_google_finance_url(company.ticker),
                         source_title=f"Yahoo Finance ({company.ticker})",
                         tier=2, events=events,
                     )
@@ -1744,8 +1760,8 @@ def process_company(
             try:
                 yf_source = Source(
                     company_id=company.id,
-                    url=f"https://finance.yahoo.com/quote/{company.ticker}",
-                    title=f"Yahoo Finance market data ({company.ticker})",
+                    url=_google_finance_url(company.ticker),
+                    title=f"Market data via yfinance ({company.ticker})",
                     document_type="api",
                 )
                 session.add(yf_source)

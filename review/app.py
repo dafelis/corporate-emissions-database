@@ -1319,6 +1319,105 @@ def render_single_company():
             "st_val": sht, "st_concept": sht_c,
         }
 
+    # ── Fin basis helper ────────────────────────────────────────────
+    _fin_basis_counter = [0]  # mutable counter for unique popup IDs
+
+    def _render_fin_basis(fin_rec, prov_data, yr):
+        """Render the financial basis cell from provenance periods."""
+        if not fin_rec:
+            return "<td class='no-data' style='text-align:center'>—</td>"
+
+        sid = str(fin_rec.source_id) if fin_rec.source_id else None
+        mkt_sid = str(fin_rec.market_data_source_id) if getattr(fin_rec, "market_data_source_id", None) else None
+
+        # Collect periods from provenance for each financial field
+        fin_fields_to_check = [
+            ("Revenue", "revenue", sid),
+            ("Gross Debt", "gross_debt", sid),
+            ("Lease Liab.", "lease_liabilities", sid),
+            ("NCI", "non_controlling_interests", sid),
+            ("Pref Shares", "preference_shares", sid),
+            ("Shares Out", "shares_outstanding", sid),
+            ("Equity", "equity_value", mkt_sid),
+        ]
+
+        field_periods = {}
+        for flabel, fname, use_sid in fin_fields_to_check:
+            if not use_sid or not prov_data:
+                continue
+            pk = f"{use_sid}:{fname}"
+            pv = prov_data.get(pk)
+            if pv and pv.get("period"):
+                field_periods[flabel] = pv["period"]
+
+        if not field_periods:
+            # Fall back to fiscal_year_end
+            fye = getattr(fin_rec, "fiscal_year_end", None)
+            if fye:
+                m, d, y = fye.month, fye.day, fye.year
+                if m == 12 and d == 31:
+                    return f"<td style='text-align:center'>CY {y}</td>"
+                if m == 3 and d == 31:
+                    return f"<td style='text-align:center'>FY {y}</td>"
+                return f"<td style='text-align:center'>{fye}</td>"
+            return "<td class='no-data' style='text-align:center'>—</td>"
+
+        def _period_to_year_end(period_str):
+            """Extract the end date from a period string and check if it's a calendar year-end."""
+            p = period_str.replace("T00:00:00", "")
+            # Formats: "2021-12-31", "2021-01-01/2021-12-31", "2021-01-01/2022-01-01"
+            if "/" in p:
+                end = p.split("/")[-1]
+            else:
+                end = p
+            return end
+
+        ends = set()
+        for period in field_periods.values():
+            ends.add(_period_to_year_end(period))
+
+        if len(ends) == 1:
+            end = ends.pop()
+            # Check if it's a calendar year-end
+            if end.endswith("-12-31"):
+                y = end[:4]
+                return f"<td style='text-align:center'>CY {y}</td>"
+            if end.endswith("-01-01"):
+                # Jan 1 of next year = Dec 31 of prior year
+                y = str(int(end[:4]) - 1)
+                return f"<td style='text-align:center'>CY {y}</td>"
+            if end.endswith("-03-31"):
+                y = end[:4]
+                return f"<td style='text-align:center'>FY {y}</td>"
+            return f"<td style='text-align:center'>{end}</td>"
+
+        # Inconsistent — build a popup
+        _fin_basis_counter[0] += 1
+        popup_id = f"fb_{yr}_{_fin_basis_counter[0]}"
+        detail_rows = ""
+        for flabel, period in sorted(field_periods.items()):
+            p_clean = period.replace("T00:00:00", "")
+            if "/" in p_clean:
+                parts = p_clean.split("/")
+                p_display = f"{parts[0]} to {parts[1]}"
+            else:
+                p_display = p_clean
+            detail_rows += (f"<tr><td style='padding:3px 10px 3px 0;color:#888'>{flabel}</td>"
+                            f"<td style='padding:3px 0'>{p_display}</td></tr>")
+
+        return (
+            f"<td style='text-align:center'>"
+            f"<span class='has-source' onclick=\"document.getElementById('{popup_id}').style.display="
+            f"document.getElementById('{popup_id}').style.display==='block'?'none':'block'\" "
+            f"title='Click to see period details'>Inconsistent</span>"
+            f"<div id='{popup_id}' style='display:none;position:absolute;background:#fff;border:1px solid #ddd;"
+            f"border-radius:6px;padding:10px 14px;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:10;"
+            f"text-align:left;font-size:12px;min-width:220px'>"
+            f"<div style='font-weight:600;margin-bottom:6px'>Period by field</div>"
+            f"<table style='border-collapse:collapse'>{detail_rows}</table>"
+            f"</div></td>"
+        )
+
     # ── Build HTML table ──────────────────────────────────────────────
     html = []
 
@@ -1383,10 +1482,14 @@ def render_single_company():
 
         for label, field_name, source_type in fields:
             if source_type == "basis":
-                rec = em if field_name == "_em_basis" else fin
-                basis = record_basis(rec)
-                cls = "no-data" if basis == "—" else ""
-                html.append(f"<td class='{cls}' style='text-align:center'>{basis}</td>")
+                if field_name == "_em_basis":
+                    basis = record_basis(em)
+                    cls = "no-data" if basis == "—" else ""
+                    html.append(f"<td class='{cls}' style='text-align:center'>{basis}</td>")
+                else:
+                    # Fin basis: derive from provenance periods
+                    fin_basis_html = _render_fin_basis(fin, provenance_data, year)
+                    html.append(fin_basis_html)
             elif source_type == "emissions":
                 value = getattr(em, field_name, None) if em else None
                 src_id = em.source_id if em else None
@@ -1421,14 +1524,16 @@ def render_single_company():
                 # Equity and EVIC use market_data_source_id
                 value = getattr(fin, field_name, None) if fin else None
                 mkt_src_id = getattr(fin, "market_data_source_id", None) if fin else None
+                mkt_calc = ('<span style="font-size:9px;color:#888;vertical-align:super" '
+                            'title="Calculated from components"> calc</span>') if field_name == "evic" else ""
                 if value is not None:
                     if mkt_src_id:
                         html.append(
                             f"<td class='has-source' onclick=\"showSource({mkt_src_id},'{field_name}')\">"
-                            f"{fmt(value)}</td>"
+                            f"{fmt(value)}{mkt_calc}</td>"
                         )
                     else:
-                        html.append(f"<td>{fmt(value)}</td>")
+                        html.append(f"<td>{fmt(value)}{mkt_calc}</td>")
                 else:
                     html.append("<td class='no-data'>—</td>")
             else:  # financial
