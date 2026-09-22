@@ -145,6 +145,31 @@ def _build_provenance_data(financial_records):
                 "shares": prov.get("shares"),
             }
             prov_data[key] = entry
+
+            # For gross_debt with components, create entries for individual LT/ST debt
+            if field == "gross_debt" and prov.get("calculated") and prov.get("components"):
+                for comp in prov["components"]:
+                    if not isinstance(comp, dict):
+                        continue
+                    concept_lower = comp.get("concept", "").lower()
+                    if any(kw in concept_lower for kw in ("noncurrent", "longterm", "long_term")):
+                        comp_key = f"{use_id}:_debt_lt"
+                    elif any(kw in concept_lower for kw in ("current", "shortterm", "short_term")):
+                        comp_key = f"{use_id}:_debt_st"
+                    else:
+                        continue
+                    prov_data[comp_key] = {
+                        "lei": lei,
+                        "entity_name": entity_name,
+                        "concept": comp.get("concept", ""),
+                        "value": comp.get("value"),
+                        "unit": prov.get("unit", ""),
+                        "period": comp.get("period", prov.get("period", "")),
+                        "decimals": comp.get("decimals", prov.get("decimals")),
+                        "year": fin.reporting_year,
+                        "calculated": False,
+                        "components": [],
+                    }
     return prov_data
 
 
@@ -297,7 +322,7 @@ function showSource(sid,field){
                 var formula=field.replace(/_/g,' ');
                 formula=formula.charAt(0).toUpperCase()+formula.slice(1);
                 h+='<div style="margin-top:14px;padding:14px;background:#f0f7ff;border-radius:6px;border:1px solid #d0e3f7">';
-                h+='<div style="font-size:11px;text-transform:uppercase;color:#666;margin-bottom:8px;letter-spacing:0.5px">Calculated value</div>';
+                h+='<div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:8px;letter-spacing:0.5px">Calculated value</div>';
                 // Formula line
                 var fparts=[];
                 for(var ci=0;ci<pv.components.length;ci++){
@@ -306,17 +331,17 @@ function showSource(sid,field){
                     cname=cname.replace(/^ifrs-full:/,'').replace(/^us-gaap:/,'').replace(/^yfinance:/,'');
                     fparts.push(cname+' ('+fmtNum(comp.value)+')');
                 }
-                h+='<div style="font-size:14px;font-weight:600;margin-bottom:10px">'+esc(formula)+' = '+fparts.join(' + ')+'</div>';
+                h+='<div style="font-size:14px;font-weight:600;color:#111;margin-bottom:10px">'+esc(formula)+' = '+fparts.join(' + ')+'</div>';
                 // Unit
                 var calcUnit=(pv.unit||'').replace('iso4217:','');
-                if(calcUnit) h+='<div style="font-size:12px;color:#555;margin-bottom:4px">Units: '+esc(calcUnit)+'</div>';
+                if(calcUnit) h+='<div style="font-size:12px;color:#111;margin-bottom:4px">Units: '+esc(calcUnit)+'</div>';
                 // Per-component periods
                 for(var ci2=0;ci2<pv.components.length;ci2++){
                     var comp2=pv.components[ci2];
                     var cn2=comp2.concept||'?';
                     cn2=cn2.replace(/^ifrs-full:/,'').replace(/^us-gaap:/,'').replace(/^yfinance:/,'');
                     var cp2=comp2.period||pv.period||'';
-                    if(cp2) h+='<div style="font-size:12px;color:#555">Period — '+esc(cn2)+': '+fmtPeriod(cp2)+'</div>';
+                    if(cp2) h+='<div style="font-size:12px;color:#111">Period — '+esc(cn2)+': '+fmtPeriod(cp2)+'</div>';
                 }
                 h+='</div>';
             } else if(field==='equity_value'){
@@ -1380,15 +1405,12 @@ def render_single_company():
                 dc = debt_components_by_year.get(year, {})
                 if field_name == "_debt_lt":
                     value = dc.get("lt_val")
-                    dc_concept = dc.get("lt_concept", "")
                 else:
                     value = dc.get("st_val")
-                    dc_concept = dc.get("st_concept", "")
                 src_id = fin.source_id if fin else None
                 if value is not None and src_id:
-                    # Build a provenance key for the component — reuse the gross_debt source
                     html.append(
-                        f"<td class='has-source' onclick=\"showSource({src_id},'gross_debt')\">"
+                        f"<td class='has-source' onclick=\"showSource({src_id},'{field_name}')\">"
                         f"{fmt(value)}</td>"
                     )
                 elif value is not None:

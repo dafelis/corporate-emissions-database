@@ -1384,7 +1384,7 @@ def _run_tier1_and_tier2(
                 if yf_filtered:
                     saved = _save_api_financial_entries(
                         yf_filtered, company, session, fin_covered,
-                        source_url=f"https://finance.yahoo.com/quote/{company.ticker}/financials/",
+                        source_url=f"https://finance.yahoo.com/quote/{company.ticker}/financials",
                         source_title=f"Yahoo Finance ({company.ticker})",
                         tier=2, events=events,
                     )
@@ -1744,7 +1744,7 @@ def process_company(
             try:
                 yf_source = Source(
                     company_id=company.id,
-                    url=f"https://finance.yahoo.com/quote/{company.ticker}/",
+                    url=f"https://finance.yahoo.com/quote/{company.ticker}",
                     title=f"Yahoo Finance market data ({company.ticker})",
                     document_type="api",
                 )
