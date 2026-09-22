@@ -82,7 +82,30 @@ def _new_cost_tracker():
         "total": 0.0, "calls": 0,
         "input_tokens": 0, "output_tokens": 0,
         "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        "by_model": {},
     }
+
+
+def _short_model(model: str) -> str:
+    """Shorten a model ID for summary display."""
+    if "haiku" in model:
+        return "haiku"
+    if "sonnet" in model:
+        return "sonnet"
+    if "opus" in model:
+        return "opus"
+    return model[:12]
+
+
+def _record_model_usage(tracker, model, cost, usage):
+    """Accumulate per-model cost so summaries can show what drove spend."""
+    bucket = tracker["by_model"].setdefault(
+        model, {"cost": 0.0, "calls": 0, "input_tokens": 0, "output_tokens": 0}
+    )
+    bucket["cost"] += cost
+    bucket["calls"] += 1
+    bucket["input_tokens"] += usage.input_tokens
+    bucket["output_tokens"] += usage.output_tokens
 
 
 _global_lock = threading.Lock()
@@ -121,6 +144,7 @@ class _TrackedMessages:
         self._tracker["output_tokens"] += usage.output_tokens
         self._tracker["cache_read_tokens"] += cache_read
         self._tracker["cache_creation_tokens"] += cache_create
+        _record_model_usage(self._tracker, model, cost, usage)
 
         if self._global_tracker is not None:
             with _global_lock:
@@ -130,6 +154,7 @@ class _TrackedMessages:
                 self._global_tracker["output_tokens"] += usage.output_tokens
                 self._global_tracker["cache_read_tokens"] += cache_read
                 self._global_tracker["cache_creation_tokens"] += cache_create
+                _record_model_usage(self._global_tracker, model, cost, usage)
                 global_total = self._global_tracker["total"]
         else:
             global_total = 0
@@ -662,6 +687,9 @@ def _extract_emissions_round(
                     if extraction.get("emissions"):
                         confidence = extraction.get("confidence_score", 0) or 0
                         if confidence < CONFIDENCE_THRESHOLD:
+                            log.info(f"    Escalating to Opus: table "
+                                     f"{candidate_tbl['index']} confidence "
+                                     f"{confidence} < {CONFIDENCE_THRESHOLD}")
                             stronger = extract_emissions(
                                 tables_md[candidate_tbl["index"]], company_name, client,
                                 model=MODEL_STRONG,
@@ -696,6 +724,8 @@ def _extract_emissions_round(
             if extraction and extraction.get("emissions"):
                 confidence = extraction.get("confidence_score", 0) or 0
                 if confidence < CONFIDENCE_THRESHOLD:
+                    log.info(f"    Escalating to Opus: text fallback confidence "
+                             f"{confidence} < {CONFIDENCE_THRESHOLD}")
                     stronger = extract_emissions_from_text(page_text, company_name, client,
                                                            model=MODEL_STRONG)
                     if stronger.get("emissions"):
@@ -1577,6 +1607,12 @@ def _print_company_summary(company_name, events, cost, elapsed_s):
                  f"({cost['calls']} API calls, "
                  f"{cost['input_tokens']:,} in / {cost['output_tokens']:,} out"
                  f"{cache_pct})")
+    for model, b in sorted(cost.get("by_model", {}).items(),
+                           key=lambda kv: -kv[1]["cost"]):
+        share = (b["cost"] / cost["total"] * 100) if cost["total"] else 0
+        lines.append(f"    · {_short_model(model):12s} ${b['cost']:7.4f} "
+                     f"({share:4.1f}%)  {b['calls']:3d} calls  "
+                     f"{b['input_tokens']:,} in / {b['output_tokens']:,} out")
     lines.append(f"  Time: {elapsed_s:.0f}s")
     lines.append("═" * 70)
     lines.append("")
@@ -1628,6 +1664,16 @@ def _print_pipeline_summary(results, total_cost, total_elapsed_s):
     cache_info = f" ({cache_read:,} cached)" if cache_read else ""
     lines.append(f"  Tokens:      {total_cost['input_tokens']:,} in / "
                  f"{total_cost['output_tokens']:,} out{cache_info}")
+
+    by_model = total_cost.get("by_model", {})
+    if by_model:
+        lines.append("")
+        lines.append("  Cost by model:")
+        for model, b in sorted(by_model.items(), key=lambda kv: -kv[1]["cost"]):
+            share = (b["cost"] / total_cost["total"] * 100) if total_cost["total"] else 0
+            lines.append(f"    {_short_model(model):8s} ${b['cost']:8.4f}  "
+                         f"({share:5.1f}%)  {b['calls']:4d} calls  "
+                         f"{b['input_tokens']:>10,} in / {b['output_tokens']:>8,} out")
     lines.append("")
 
     for line in lines:
