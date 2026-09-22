@@ -1783,11 +1783,12 @@ def process_company(
                         except (json.JSONDecodeError, TypeError):
                             notes_data = {}
                         prov = notes_data.get("provenance", {})
+                        actual_date = equity_data.get("price_date", target_date)
                         prov["equity_value"] = {
                             "concept": "market_cap",
                             "value": equity_data["market_cap"],
                             "unit": f"iso4217:{equity_data['currency']}",
-                            "period": str(target_date),
+                            "period": str(actual_date),
                             "calculated": False,
                             "ticker": company.ticker,
                             "share_price": equity_data["share_price"],

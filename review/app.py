@@ -294,6 +294,7 @@ _POPUP_STYLES = """
 _POPUP_JS = r"""
 var SOURCES=__SOURCES__;
 var PROVENANCE=__PROVENANCE__;
+var FIN_BASIS=__FIN_BASIS__;
 function fmtNum(v){
     if(v==null) return '—';
     if(Math.abs(v)>=1e9) return (v/1e9).toFixed(2)+'bn';
@@ -397,6 +398,23 @@ function showYfinance(){
     document.getElementById('modal-backdrop').style.display='block';
     document.getElementById('source-modal').style.display='block';
 }
+function showFinBasis(yr){
+    var fb=FIN_BASIS[String(yr)]; if(!fb) return;
+    var h='<div style="font-weight:600;margin-bottom:10px">Period by field — '+yr+'</div>';
+    h+='<table style="border-collapse:collapse;width:100%;font-size:13px">';
+    var keys=Object.keys(fb).sort();
+    for(var i=0;i<keys.length;i++){
+        var p=fb[keys[i]].replace(/T00:00:00/g,'');
+        if(p.indexOf('/')>=0){var pp=p.split('/');p=pp[0]+' to '+pp[1];}
+        h+='<tr><td style="padding:4px 10px 4px 0;color:#888;white-space:nowrap">'+esc(keys[i])+'</td>';
+        h+='<td style="padding:4px 0;font-weight:500">'+esc(p)+'</td></tr>';
+    }
+    h+='</table>';
+    document.getElementById('modal-title').textContent='Financial Basis';
+    document.getElementById('modal-body').innerHTML=h;
+    document.getElementById('modal-backdrop').style.display='block';
+    document.getElementById('source-modal').style.display='block';
+}
 function closeModal(){
     document.getElementById('modal-backdrop').style.display='none';
     document.getElementById('source-modal').style.display='none';
@@ -436,11 +454,15 @@ _POPUP_MODAL_HTML = """
 """
 
 
-def _source_popup_block(source_data, provenance_data=None):
+def _source_popup_block(source_data, provenance_data=None, fin_basis_data=None):
     """Return modal container + <script> with embedded source data."""
     safe_json = json.dumps(source_data).replace("</", "<\\/")
     safe_prov = json.dumps(provenance_data or {}).replace("</", "<\\/")
-    js = _POPUP_JS.replace("__SOURCES__", safe_json).replace("__PROVENANCE__", safe_prov)
+    safe_fb = json.dumps(fin_basis_data or {}).replace("</", "<\\/")
+    js = (_POPUP_JS
+          .replace("__SOURCES__", safe_json)
+          .replace("__PROVENANCE__", safe_prov)
+          .replace("__FIN_BASIS__", safe_fb))
     return _POPUP_MODAL_HTML + "\n<script>" + js + "</script>"
 
 
@@ -1320,7 +1342,7 @@ def render_single_company():
         }
 
     # ── Fin basis helper ────────────────────────────────────────────
-    _fin_basis_counter = [0]  # mutable counter for unique popup IDs
+    fin_basis_details = {}  # {year: {field_label: period_str}} for inconsistent years
 
     def _render_fin_basis(fin_rec, prov_data, yr):
         """Render the financial basis cell from provenance periods."""
@@ -1391,31 +1413,12 @@ def render_single_company():
                 return f"<td style='text-align:center'>FY {y}</td>"
             return f"<td style='text-align:center'>{end}</td>"
 
-        # Inconsistent — build a popup
-        _fin_basis_counter[0] += 1
-        popup_id = f"fb_{yr}_{_fin_basis_counter[0]}"
-        detail_rows = ""
-        for flabel, period in sorted(field_periods.items()):
-            p_clean = period.replace("T00:00:00", "")
-            if "/" in p_clean:
-                parts = p_clean.split("/")
-                p_display = f"{parts[0]} to {parts[1]}"
-            else:
-                p_display = p_clean
-            detail_rows += (f"<tr><td style='padding:3px 10px 3px 0;color:#888'>{flabel}</td>"
-                            f"<td style='padding:3px 0'>{p_display}</td></tr>")
-
+        # Inconsistent — store data for modal popup
+        fin_basis_details[yr] = field_periods
         return (
             f"<td style='text-align:center'>"
-            f"<span class='has-source' onclick=\"document.getElementById('{popup_id}').style.display="
-            f"document.getElementById('{popup_id}').style.display==='block'?'none':'block'\" "
-            f"title='Click to see period details'>Inconsistent</span>"
-            f"<div id='{popup_id}' style='display:none;position:absolute;background:#fff;border:1px solid #ddd;"
-            f"border-radius:6px;padding:10px 14px;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:10;"
-            f"text-align:left;font-size:12px;min-width:220px'>"
-            f"<div style='font-weight:600;margin-bottom:6px'>Period by field</div>"
-            f"<table style='border-collapse:collapse'>{detail_rows}</table>"
-            f"</div></td>"
+            f"<span class='has-source' onclick='showFinBasis({yr})' "
+            f"title='Click to see period details'>Inconsistent</span></td>"
         )
 
     # ── Build HTML table ──────────────────────────────────────────────
@@ -1566,7 +1569,7 @@ def render_single_company():
     html.append("</tbody></table>")
 
     # Append modal + JS (with provenance for financial field popups)
-    html.append(_source_popup_block(source_data, provenance_data))
+    html.append(_source_popup_block(source_data, provenance_data, fin_basis_details))
 
     # Render
     table_height = max(500, 70 + len(all_years) * 34)
