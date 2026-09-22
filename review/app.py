@@ -392,7 +392,7 @@ function showSource(sid,field,yr){
         }
     }
     if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'" onclick="expandImg(this.src)" title="Click to expand"></div>';
-    if(s.created && !field) h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+esc(s.created)+' UTC</div>';
+    if(s.created) h+='<div style="margin-top:10px;font-size:11px;color:#999">Source fetched: '+esc(s.created)+' UTC</div>';
     document.getElementById('modal-title').textContent='Source';
     document.getElementById('modal-body').innerHTML=h;
     document.getElementById('modal-backdrop').style.display='block';
