@@ -1420,18 +1420,18 @@ def render_single_company():
             if pv and pv.get("period"):
                 field_periods[flabel] = pv["period"]
 
-        if not field_periods:
-            fye = getattr(fin_rec, "fiscal_year_end", None)
-            if fye:
-                return f"<td style='text-align:center'>{_month_label(fye.month, fye.year)}</td>"
-            return "<td class='no-data' style='text-align:center'>—</td>"
-
         _MONTH_NAMES = {1: "January", 2: "February", 3: "March", 4: "April",
                         5: "May", 6: "June", 7: "July", 8: "August",
                         9: "September", 10: "October", 11: "November", 12: "December"}
 
         def _month_label(month, year):
             return f"End {_MONTH_NAMES[month]} {year}"
+
+        if not field_periods:
+            fye = getattr(fin_rec, "fiscal_year_end", None)
+            if fye:
+                return f"<td style='text-align:center'>{_month_label(fye.month, fye.year)}</td>"
+            return "<td class='no-data' style='text-align:center'>—</td>"
 
         def _period_to_month_year(period_str):
             """Normalize a period end date to (month, year).
