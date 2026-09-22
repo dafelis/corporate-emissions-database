@@ -129,6 +129,9 @@ def _build_provenance_data(financial_records):
             if not use_id:
                 continue
             key = f"{use_id}:{field}:{fin.reporting_year}"
+            ext_date = ""
+            if getattr(fin, "extraction_date", None):
+                ext_date = fin.extraction_date.strftime("%Y-%m-%d %H:%M")
             entry = {
                 "lei": lei,
                 "entity_name": entity_name,
@@ -144,6 +147,7 @@ def _build_provenance_data(financial_records):
                 "share_price": prov.get("share_price"),
                 "shares": prov.get("shares"),
                 "shares_source": prov.get("shares_source", ""),
+                "extracted": ext_date,
             }
             prov_data[key] = entry
 
@@ -170,6 +174,7 @@ def _build_provenance_data(financial_records):
                         "year": fin.reporting_year,
                         "calculated": False,
                         "components": [],
+                        "extracted": ext_date,
                     }
 
             # For equity_value, create share price entry from provenance
@@ -186,6 +191,7 @@ def _build_provenance_data(financial_records):
                     "calculated": False,
                     "components": [],
                     "ticker": prov.get("ticker", ""),
+                    "extracted": ext_date,
                 }
     return prov_data
 
@@ -202,6 +208,7 @@ def _build_source_data(session_obj, source_ids, include_screenshots=False):
             "url": s.url or "",
             "type": s.document_type or "Unknown",
             "page": (s.page_number + 1) if s.page_number is not None else None,
+            "created": s.created_at.strftime("%Y-%m-%d %H:%M") if s.created_at else "",
         }
         if include_screenshots and s.screenshot_path and os.path.exists(s.screenshot_path):
             try:
@@ -381,9 +388,11 @@ function showSource(sid,field,yr){
                 }
                 h+='</table>';
             }
+            if(pv.extracted) h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+esc(pv.extracted)+' UTC</div>';
         }
     }
     if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'" onclick="expandImg(this.src)" title="Click to expand"></div>';
+    if(s.created && !field) h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+esc(s.created)+' UTC</div>';
     document.getElementById('modal-title').textContent='Source';
     document.getElementById('modal-body').innerHTML=h;
     document.getElementById('modal-backdrop').style.display='block';
