@@ -360,6 +360,8 @@ function showSource(sid,field,yr,extDate){
     var h='<div class="src-title">📄 '+esc(s.title)+'</div>';
     h+='<div class="src-meta">Type: '+esc(s.type);
     if(s.page) h+=' &nbsp;|&nbsp; Page: '+s.page;
+    var _ts=s.created||extDate||'';
+    h+=' &nbsp;|&nbsp; Extracted: '+(_ts?esc(_ts)+' UTC':'Unknown');
     h+='</div>';
     if(s.url) h+='<div class="src-link"><a href="'+esc(s.url)+'" target="_blank" rel="noopener">Open source document ↗</a></div>';
     // Show provenance details for Tier 1/2 financial fields
@@ -418,7 +420,6 @@ function showSource(sid,field,yr,extDate){
         }
     }
     if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'" onclick="expandImg(this.src)" title="Click to expand"></div>';
-    if(!showedExtracted){var ts=s.created||extDate||'';h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+(ts?esc(ts)+' UTC':'Unknown')+'</div>';}
     document.getElementById('modal-title').textContent='Source';
     document.getElementById('modal-body').innerHTML=h;
     document.getElementById('modal-backdrop').style.display='block';
