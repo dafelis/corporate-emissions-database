@@ -241,7 +241,19 @@ def cmd_extract(args):
 
     from pipeline.runner import run_pipeline
 
-    company_ids = [args.id] if args.id else None
+    company_ids = None
+    if args.id:
+        company_ids = [args.id]
+    elif args.ids:
+        company_ids = []
+        for part in args.ids.split(","):
+            part = part.strip()
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                company_ids.extend(range(int(lo), int(hi) + 1))
+            else:
+                company_ids.append(int(part))
+        company_ids = sorted(set(company_ids))
 
     # If neither --emissions nor --financial given, run both
     skip_emissions = args.financial and not args.emissions
@@ -425,6 +437,8 @@ def main():
     # extract
     extract_parser = subparsers.add_parser("extract", help="Run extraction pipeline")
     extract_parser.add_argument("--id", type=int, help="Process a single company by ID")
+    extract_parser.add_argument("--ids", type=str,
+                                help="Company IDs: comma-separated (1,2,3) or range (1-20) or both (1-10,15,20)")
     extract_parser.add_argument("--delay", type=float, default=2.0,
                                 help="Seconds between companies (rate limiting)")
     extract_parser.add_argument("--emissions", action="store_true",
