@@ -357,10 +357,23 @@ def cmd_reset(args):
             print(f"Company with ID {args.id} not found")
             sys.exit(1)
         companies = [company]
+    elif args.ids:
+        id_list = []
+        for part in args.ids.split(","):
+            part = part.strip()
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                id_list.extend(range(int(lo), int(hi) + 1))
+            else:
+                id_list.append(int(part))
+        companies = session.query(Company).filter(Company.id.in_(sorted(set(id_list)))).all()
+        if not companies:
+            print(f"No companies found for IDs: {args.ids}")
+            sys.exit(1)
     elif args.all:
         companies = session.query(Company).all()
     else:
-        print("Specify --id <company_id> or --all")
+        print("Specify --id <company_id>, --ids <range>, or --all")
         sys.exit(1)
 
     # If no category flags given, reset everything (backwards compatible)
@@ -469,6 +482,8 @@ def main():
     # reset
     reset_parser = subparsers.add_parser("reset", help="Delete data for re-extraction")
     reset_parser.add_argument("--id", type=int, help="Reset a single company by ID")
+    reset_parser.add_argument("--ids", type=str,
+                                help="Company IDs: comma-separated (1,2,3) or range (1-20) or both (1-10,15,20)")
     reset_parser.add_argument("--all", action="store_true", help="Reset all companies")
     reset_parser.add_argument("--emissions", action="store_true", help="Delete emissions data only")
     reset_parser.add_argument("--financial", action="store_true", help="Delete financial data only")
