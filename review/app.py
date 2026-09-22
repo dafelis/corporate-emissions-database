@@ -98,6 +98,43 @@ def _collect_source_ids(records):
     return ids
 
 
+def _build_provenance_data(financial_records):
+    """Build provenance lookup keyed by "sourceId:fieldName" for financial popups."""
+    prov_data = {}
+    for fin in financial_records:
+        notes_raw = getattr(fin, "extraction_notes", None)
+        if not notes_raw:
+            continue
+        try:
+            notes_obj = json.loads(notes_raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(notes_obj, dict):
+            continue
+        provenance = notes_obj.get("provenance", {})
+        entity_name = notes_obj.get("entity_name", "")
+        lei = notes_obj.get("lei", "")
+        src_id = str(fin.source_id) if fin.source_id else None
+        if not src_id or not provenance:
+            continue
+        for field, prov in provenance.items():
+            if not isinstance(prov, dict):
+                continue
+            key = f"{src_id}:{field}"
+            entry = {
+                "lei": lei,
+                "entity_name": entity_name,
+                "concept": prov.get("concept", ""),
+                "value": prov.get("value"),
+                "unit": prov.get("unit", ""),
+                "period": prov.get("period", ""),
+                "decimals": prov.get("decimals"),
+                "year": fin.reporting_year,
+            }
+            prov_data[key] = entry
+    return prov_data
+
+
 def _build_source_data(session_obj, source_ids, include_screenshots=False):
     """Build a dict keyed by str(source_id) for embedding in JavaScript."""
     if not source_ids:
@@ -215,13 +252,47 @@ _POPUP_STYLES = """
 
 _POPUP_JS = r"""
 var SOURCES=__SOURCES__;
-function showSource(sid){
+var PROVENANCE=__PROVENANCE__;
+function fmtNum(v){
+    if(v==null) return '—';
+    if(Math.abs(v)>=1e9) return (v/1e9).toFixed(2)+'bn';
+    if(Math.abs(v)>=1e6) return (v/1e6).toFixed(1)+'m';
+    return v.toLocaleString();
+}
+function fmtPeriod(p){
+    if(!p) return '—';
+    var parts=p.replace(/T00:00:00/g,'').split('/');
+    return parts.join(' to ');
+}
+function showSource(sid,field){
     var s=SOURCES[String(sid)]; if(!s) return;
     var h='<div class="src-title">📄 '+esc(s.title)+'</div>';
     h+='<div class="src-meta">Type: '+esc(s.type);
     if(s.page) h+=' &nbsp;|&nbsp; Page: '+s.page;
     h+='</div>';
     if(s.url) h+='<div class="src-link"><a href="'+esc(s.url)+'" target="_blank" rel="noopener">Open source document ↗</a></div>';
+    // Show provenance details for Tier 1/2 financial fields
+    if(field){
+        var pk=String(sid)+':'+field;
+        var pv=PROVENANCE[pk];
+        if(pv){
+            h+='<table style="margin-top:14px;font-size:13px;border-collapse:collapse;width:100%">';
+            var rows=[
+                ['LEI',pv.lei||'—'],
+                ['Entity name',pv.entity_name||'—'],
+                ['XBRL concept','<code>'+esc(pv.concept)+'</code>'],
+                ['Value',fmtNum(pv.value)+' <span style="color:#888">(raw: '+(pv.value!=null?pv.value.toLocaleString():'—')+')</span>'],
+                ['Unit',esc((pv.unit||'').replace('iso4217:',''))],
+                ['Period',fmtPeriod(pv.period)],
+                ['Decimals',pv.decimals!=null?String(pv.decimals):'—']
+            ];
+            for(var i=0;i<rows.length;i++){
+                h+='<tr><td style="padding:4px 10px 4px 0;color:#888;white-space:nowrap;vertical-align:top">'+rows[i][0]+'</td>';
+                h+='<td style="padding:4px 0;font-weight:500">'+rows[i][1]+'</td></tr>';
+            }
+            h+='</table>';
+        }
+    }
     if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'" onclick="expandImg(this.src)" title="Click to expand"></div>';
     document.getElementById('modal-title').textContent='Source';
     document.getElementById('modal-body').innerHTML=h;
@@ -277,10 +348,11 @@ _POPUP_MODAL_HTML = """
 """
 
 
-def _source_popup_block(source_data):
+def _source_popup_block(source_data, provenance_data=None):
     """Return modal container + <script> with embedded source data."""
     safe_json = json.dumps(source_data).replace("</", "<\\/")
-    js = _POPUP_JS.replace("__SOURCES__", safe_json)
+    safe_prov = json.dumps(provenance_data or {}).replace("</", "<\\/")
+    js = _POPUP_JS.replace("__SOURCES__", safe_json).replace("__PROVENANCE__", safe_prov)
     return _POPUP_MODAL_HTML + "\n<script>" + js + "</script>"
 
 
@@ -1055,6 +1127,7 @@ def render_single_company():
     # ── Build source data (with screenshots for single-company view) ──
     source_ids = _collect_source_ids(emissions) | _collect_source_ids(financials)
     source_data = _build_source_data(session, source_ids, include_screenshots=True)
+    provenance_data = _build_provenance_data(financials)
 
     # ── Helpers ────────────────────────────────────────────────────────
     def record_basis(rec):
@@ -1197,7 +1270,7 @@ def render_single_company():
                         html.append(f"<td style='text-align:center'>{int(value)}</td>")
                     elif src_id:
                         html.append(
-                            f"<td class='has-source' onclick='showSource({src_id})'>"
+                            f"<td class='has-source' onclick=\"showSource({src_id},'{field_name}')\">"
                             f"{fmt(value)}</td>"
                         )
                     else:
@@ -1209,8 +1282,8 @@ def render_single_company():
 
     html.append("</tbody></table>")
 
-    # Append modal + JS
-    html.append(_source_popup_block(source_data))
+    # Append modal + JS (with provenance for financial field popups)
+    html.append(_source_popup_block(source_data, provenance_data))
 
     # Render
     table_height = max(500, 70 + len(all_years) * 34)

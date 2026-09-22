@@ -1216,8 +1216,12 @@ def _save_api_financial_entries(
                 existing.lease_liabilities_confidence = _fconf("lease_liabilities")
                 existing.is_financial_institution = entry.get("is_financial_institution")
                 notes = entry.get("notes", [])
-                if notes:
-                    existing.extraction_notes = json.dumps(notes)
+                existing.extraction_notes = json.dumps({
+                    "notes": notes,
+                    "provenance": entry.get("provenance", {}),
+                    "entity_name": company.name,
+                    "lei": getattr(company, "lei", None),
+                })
                 if val_flags:
                     existing.validation_flags = json.dumps(val_flags)
                 log.info(f"    Year {year}: updated from Tier {tier} API")
@@ -1277,7 +1281,12 @@ def _save_api_financial_entries(
             source_tier=tier,
             source_type="api",
             validation_flags=json.dumps(val_flags) if val_flags else None,
-            extraction_notes=json.dumps(notes) if notes else None,
+            extraction_notes=json.dumps({
+                "notes": notes,
+                "provenance": entry.get("provenance", {}),
+                "entity_name": company.name,
+                "lei": getattr(company, "lei", None),
+            }),
             review_status="flagged" if val_flags else "pending",
         )
         session.add(fin_record)

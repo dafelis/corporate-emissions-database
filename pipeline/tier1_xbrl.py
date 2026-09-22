@@ -93,8 +93,8 @@ def _build_concept_index(facts: dict) -> dict[str, list[dict]]:
     return index
 
 
-def _pick_value(index: dict, concept_set: set[str]) -> tuple[float | None, str | None]:
-    """Return (value, concept_name) for the first numeric match.
+def _pick_value(index: dict, concept_set: set[str]) -> tuple[float | None, dict | None]:
+    """Return (value, provenance_dict) for the first numeric match.
 
     Prefers facts with fewer dimensional qualifiers (= consolidated totals).
     """
@@ -105,20 +105,44 @@ def _pick_value(index: dict, concept_set: set[str]) -> tuple[float | None, str |
             if val is None:
                 continue
             try:
-                return float(val), concept
+                fval = float(val)
             except (ValueError, TypeError):
                 continue
+            dims = f.get("dimensions", {})
+            prov = {
+                "concept": concept,
+                "value": fval,
+                "unit": dims.get("unit", ""),
+                "period": dims.get("period", ""),
+                "decimals": f.get("decimals"),
+                "entity": dims.get("entity", ""),
+            }
+            return fval, prov
     return None, None
 
 
-def _sum_pairs(index: dict, pairs: list[tuple[str, str]]) -> tuple[float | None, str | None]:
-    """Try each (long, short) pair; return (sum, "conceptA + conceptB") for first hit."""
+def _sum_pairs(index: dict, pairs: list[tuple[str, str]]) -> tuple[float | None, dict | None]:
+    """Try each (long, short) pair; return (sum, provenance) for first hit."""
     for a, b in pairs:
-        va, ca = _pick_value(index, {a})
-        vb, cb = _pick_value(index, {b})
+        va, pa = _pick_value(index, {a})
+        vb, pb = _pick_value(index, {b})
         if va is not None or vb is not None:
-            parts = [c for c in [ca, cb] if c]
-            return (va or 0) + (vb or 0), " + ".join(parts)
+            parts = []
+            if pa:
+                parts.append(pa)
+            if pb:
+                parts.append(pb)
+            concept_str = " + ".join(p["concept"] for p in parts)
+            prov = {
+                "concept": concept_str,
+                "value": (va or 0) + (vb or 0),
+                "unit": (pa or pb or {}).get("unit", ""),
+                "period": (pa or pb or {}).get("period", ""),
+                "decimals": (pa or pb or {}).get("decimals"),
+                "entity": (pa or pb or {}).get("entity", ""),
+                "components": parts,
+            }
+            return (va or 0) + (vb or 0), prov
     return None, None
 
 
@@ -205,26 +229,39 @@ def extract_financials_from_xbrl(
         filing_dir = json_path.rsplit("/", 1)[0] if "/" in json_path else ""
         viewer_url = f"{_BASE}{filing_dir}/" if filing_dir else None
 
-        revenue, rev_concept = _pick_value(index, _REVENUE_CONCEPTS)
+        revenue, rev_prov = _pick_value(index, _REVENUE_CONCEPTS)
 
         # Gross debt: try single concept first, then sum current + noncurrent pairs
-        gross_debt, debt_concept = _pick_value(index, _DEBT_SINGLE_CONCEPTS)
+        gross_debt, debt_prov = _pick_value(index, _DEBT_SINGLE_CONCEPTS)
         if gross_debt is None:
-            gross_debt, debt_concept = _sum_pairs(index, _DEBT_SUM_PAIRS)
+            gross_debt, debt_prov = _sum_pairs(index, _DEBT_SUM_PAIRS)
 
         # Lease liabilities
-        lease_liab, lease_concept = _pick_value(index, _LEASE_SINGLE_CONCEPTS)
+        lease_liab, lease_prov = _pick_value(index, _LEASE_SINGLE_CONCEPTS)
         if lease_liab is None:
-            lease_liab, lease_concept = _sum_pairs(index, _LEASE_SUM_PAIRS)
+            lease_liab, lease_prov = _sum_pairs(index, _LEASE_SUM_PAIRS)
 
-        nci, nci_concept = _pick_value(index, _NCI_CONCEPTS)
-        pref, pref_concept = _pick_value(index, _PREF_CONCEPTS)
-        shares, shares_concept = _pick_value(index, _SHARES_CONCEPTS)
+        nci, nci_prov = _pick_value(index, _NCI_CONCEPTS)
+        pref, pref_prov = _pick_value(index, _PREF_CONCEPTS)
+        shares, shares_prov = _pick_value(index, _SHARES_CONCEPTS)
 
         if all(v is None for v in [revenue, gross_debt, shares]):
             log.info(f"    Tier 1 XBRL: {fy} — no PCAF fields found in "
                      f"{len(raw_facts)} facts ({len(index)} concepts)")
             continue
+
+        def _ref(prov):
+            return prov["concept"] if prov else None
+
+        # Build per-field provenance for the popup
+        provenance = {}
+        for field, prov in [("revenue", rev_prov), ("gross_debt", debt_prov),
+                            ("lease_liabilities", lease_prov),
+                            ("non_controlling_interests", nci_prov),
+                            ("preference_shares", pref_prov),
+                            ("shares_outstanding", shares_prov)]:
+            if prov:
+                provenance[field] = prov
 
         entry = {
             "reporting_year": fy,
@@ -232,12 +269,13 @@ def extract_financials_from_xbrl(
             "currency": currency,
             "unit_multiplier": 1,
             "viewer_url": viewer_url,
-            "gross_debt": {"value": gross_debt, "components": [], "ref": debt_concept, "confidence": "high"},
-            "lease_liabilities": {"value": lease_liab, "label": lease_concept, "ref": lease_concept, "confidence": "high"},
-            "non_controlling_interests": {"value": nci, "label": nci_concept, "ref": nci_concept, "confidence": "high"},
-            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": pref_concept},
-            "shares_outstanding": {"value": shares, "share_class": "", "ref": shares_concept, "confidence": "high"},
-            "revenue": {"value": revenue, "label": rev_concept, "ref": rev_concept, "confidence": "high"},
+            "provenance": provenance,
+            "gross_debt": {"value": gross_debt, "components": [], "ref": _ref(debt_prov), "confidence": "high"},
+            "lease_liabilities": {"value": lease_liab, "label": _ref(lease_prov), "ref": _ref(lease_prov), "confidence": "high"},
+            "non_controlling_interests": {"value": nci, "label": _ref(nci_prov), "ref": _ref(nci_prov), "confidence": "high"},
+            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": _ref(pref_prov)},
+            "shares_outstanding": {"value": shares, "share_class": "", "ref": _ref(shares_prov), "confidence": "high"},
+            "revenue": {"value": revenue, "label": _ref(rev_prov), "ref": _ref(rev_prov), "confidence": "high"},
             "is_financial_institution": False,
             "notes": [f"Tier 1: extracted from XBRL IFRS filing (LEI {lei})"],
         }
