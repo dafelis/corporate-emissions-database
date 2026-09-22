@@ -182,15 +182,19 @@ def find_financial_tables(
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=4096,
-        system=(
-            "You are an expert at identifying financial data in company reports. "
-            "Given table previews, rank ALL tables from most to least likely to contain "
-            "data needed for PCAF EVIC calculation: revenue, total borrowings/gross debt, "
-            "lease liabilities, non-controlling interests, preference shares, shares "
-            "outstanding. Look for consolidated income statements, balance sheets, "
-            "borrowings notes, equity notes, and financial summaries. "
-            "Assign each a relevance score 0-100. Every table must appear in the ranking."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are an expert at identifying financial data in company reports. "
+                "Given table previews, rank ALL tables from most to least likely to contain "
+                "data needed for PCAF EVIC calculation: revenue, total borrowings/gross debt, "
+                "lease liabilities, non-controlling interests, preference shares, shares "
+                "outstanding. Look for consolidated income statements, balance sheets, "
+                "borrowings notes, equity notes, and financial summaries. "
+                "Assign each a relevance score 0-100. Every table must appear in the ranking."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",
@@ -248,7 +252,11 @@ def extract_financials(
     response = client.messages.create(
         model=model,
         max_tokens=8192,
-        system=PCAF_EXTRACTION_PROMPT,
+        system=[{
+            "type": "text",
+            "text": PCAF_EXTRACTION_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",
@@ -287,7 +295,11 @@ def extract_financials_from_pdf(
     response = client.messages.create(
         model=model,
         max_tokens=8192,
-        system=PCAF_EXTRACTION_PROMPT,
+        system=[{
+            "type": "text",
+            "text": PCAF_EXTRACTION_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",

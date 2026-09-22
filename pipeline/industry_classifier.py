@@ -69,17 +69,21 @@ def classify_company(
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=2048,
-        system=(
-            "You are an expert in industry classification systems. "
-            "Given a company name and its sector/industry from Yahoo Finance, "
-            "map it to the most appropriate codes in three classification systems:\n"
-            "1. US SIC (Standard Industrial Classification) — 4-digit code\n"
-            "2. NAICS (North American Industry Classification System) — 5-6 digit code\n"
-            "3. NACE Rev. 2 (EU statistical classification) — code like '64.19'\n\n"
-            "Use the primary business activity of the company. "
-            "If the company is a conglomerate, use the dominant revenue segment. "
-            "Be precise with the codes — use real, valid codes from each system."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are an expert in industry classification systems. "
+                "Given a company name and its sector/industry from Yahoo Finance, "
+                "map it to the most appropriate codes in three classification systems:\n"
+                "1. US SIC (Standard Industrial Classification) — 4-digit code\n"
+                "2. NAICS (North American Industry Classification System) — 5-6 digit code\n"
+                "3. NACE Rev. 2 (EU statistical classification) — code like '64.19'\n\n"
+                "Use the primary business activity of the company. "
+                "If the company is a conglomerate, use the dominant revenue segment. "
+                "Be precise with the codes — use real, valid codes from each system."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",

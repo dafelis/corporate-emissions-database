@@ -10,6 +10,7 @@ so earlier years get skipped if already covered.
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, date as date_type
 
@@ -41,6 +42,8 @@ from pipeline.storage import upload_file
 from pipeline.config import (
     TARGET_START_YEAR, TARGET_END_YEAR, MAX_SEARCHES,
     CONFIDENCE_THRESHOLD, MODEL_FAST, MODEL_STRONG,
+    BUDGET_PER_COMPANY, BUDGET_GLOBAL, VERIFICATION_SKIP_THRESHOLD,
+    CONCURRENT_COMPANIES,
 )
 
 logging.basicConfig(
@@ -58,37 +61,98 @@ MODEL_COSTS = {
     "claude-opus-5": (15.0, 75.0),
 }
 
+# Cached input tokens are 90% cheaper
+CACHE_DISCOUNT = 0.1
+
+
+class BudgetExceeded(Exception):
+    """Raised when a budget cap is hit."""
+
+    def __init__(self, scope: str, spent: float, limit: float):
+        self.scope = scope
+        self.spent = spent
+        self.limit = limit
+        super().__init__(
+            f"{scope} budget exceeded: ${spent:.4f} / ${limit:.2f}"
+        )
+
 
 def _new_cost_tracker():
-    return {"total": 0.0, "calls": 0, "input_tokens": 0, "output_tokens": 0}
+    return {
+        "total": 0.0, "calls": 0,
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_creation_tokens": 0,
+    }
+
+
+_global_lock = threading.Lock()
 
 
 class _TrackedMessages:
     """Proxy for client.messages that records token usage and cost."""
 
-    def __init__(self, messages, tracker):
+    def __init__(self, messages, tracker, budget_limit=None, global_tracker=None, global_limit=None):
         self._messages = messages
         self._tracker = tracker
+        self._budget_limit = budget_limit
+        self._global_tracker = global_tracker
+        self._global_limit = global_limit
 
     def create(self, **kwargs):
         response = self._messages.create(**kwargs)
         model = kwargs.get("model", "unknown")
         usage = response.usage
         in_rate, out_rate = MODEL_COSTS.get(model, (15.0, 75.0))
-        cost = (usage.input_tokens * in_rate + usage.output_tokens * out_rate) / 1_000_000
+
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        regular_input = usage.input_tokens - cache_read - cache_create
+
+        cost = (
+            regular_input * in_rate
+            + cache_read * in_rate * CACHE_DISCOUNT
+            + cache_create * in_rate * 1.25
+            + usage.output_tokens * out_rate
+        ) / 1_000_000
+
         self._tracker["total"] += cost
         self._tracker["calls"] += 1
         self._tracker["input_tokens"] += usage.input_tokens
         self._tracker["output_tokens"] += usage.output_tokens
+        self._tracker["cache_read_tokens"] += cache_read
+        self._tracker["cache_creation_tokens"] += cache_create
+
+        if self._global_tracker is not None:
+            with _global_lock:
+                self._global_tracker["total"] += cost
+                self._global_tracker["calls"] += 1
+                self._global_tracker["input_tokens"] += usage.input_tokens
+                self._global_tracker["output_tokens"] += usage.output_tokens
+                self._global_tracker["cache_read_tokens"] += cache_read
+                self._global_tracker["cache_creation_tokens"] += cache_create
+                global_total = self._global_tracker["total"]
+        else:
+            global_total = 0
+
+        if self._budget_limit and self._tracker["total"] > self._budget_limit:
+            raise BudgetExceeded("Per-company", self._tracker["total"], self._budget_limit)
+        if self._global_limit and global_total > self._global_limit:
+            raise BudgetExceeded("Global", global_total, self._global_limit)
+
         return response
 
 
 class _TrackedClient:
     """Wraps an Anthropic client to track API costs transparently."""
 
-    def __init__(self, client, tracker):
+    def __init__(self, client, tracker, budget_limit=None, global_tracker=None, global_limit=None):
         self._client = client
-        self.messages = _TrackedMessages(client.messages, tracker)
+        self.messages = _TrackedMessages(
+            client.messages, tracker,
+            budget_limit=budget_limit,
+            global_tracker=global_tracker,
+            global_limit=global_limit,
+        )
 
     def __getattr__(self, name):
         return getattr(self._client, name)
@@ -387,6 +451,7 @@ def _extract_emissions_round(
     search_result = search_for_emissions_source(
         company_name, anthropic_key, exa_key,
         target_year=target_year, exclude_urls=list(searched_urls),
+        client=client,
     )
     candidates = search_result.get("candidates", [search_result])
     url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
@@ -512,7 +577,7 @@ def _extract_emissions_round(
                         original_pg = best_pg
 
                         verified = False
-                        if best_score >= 7:
+                        if best_score >= VERIFICATION_SKIP_THRESHOLD:
                             log.info(f"    Year {year}: strong text match "
                                      f"(score={best_score}) on page "
                                      f"{best_pg}, skipping verification")
@@ -1428,6 +1493,7 @@ def _extract_financials_round(
     fin_search = search_for_annual_report(
         company_name, anthropic_key, exa_key,
         target_year=target_year, exclude_urls=list(searched_urls),
+        client=client,
     )
     candidates = fin_search.get("candidates", [fin_search])
     url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
@@ -1497,9 +1563,14 @@ def _print_company_summary(company_name, events, cost, elapsed_s):
             lines.append(f"    ✗ {e['message'][:100]}")
 
     # Cost
+    cache_pct = (
+        f" ({cost.get('cache_read_tokens', 0):,} cached)"
+        if cost.get("cache_read_tokens") else ""
+    )
     lines.append(f"  Cost: ${cost['total']:.4f} "
                  f"({cost['calls']} API calls, "
-                 f"{cost['input_tokens']:,} in / {cost['output_tokens']:,} out)")
+                 f"{cost['input_tokens']:,} in / {cost['output_tokens']:,} out"
+                 f"{cache_pct})")
     lines.append(f"  Time: {elapsed_s:.0f}s")
     lines.append("═" * 70)
     lines.append("")
@@ -1521,9 +1592,12 @@ def _print_pipeline_summary(results, total_cost, total_elapsed_s):
     n_success = sum(1 for r in results if r["status"] == "success")
     n_skipped = sum(1 for r in results if r["status"] == "skipped")
     n_failed = sum(1 for r in results if r["status"] == "failed")
+    n_budget = sum(1 for r in results if r.get("status") == "budget_paused")
 
-    lines.append(f"  Companies: {len(results)} total — "
-                 f"{n_success} processed, {n_skipped} skipped, {n_failed} failed")
+    summary_parts = [f"{n_success} processed", f"{n_skipped} skipped", f"{n_failed} failed"]
+    if n_budget:
+        summary_parts.append(f"{n_budget} budget-paused")
+    lines.append(f"  Companies: {len(results)} total — " + ", ".join(summary_parts))
 
     total_em = sum(r.get("emissions_records", 0) for r in results)
     total_fin = sum(r.get("financial_records", 0) for r in results)
@@ -1535,7 +1609,7 @@ def _print_pipeline_summary(results, total_cost, total_elapsed_s):
         for r in results:
             em = r.get("emissions_records", 0)
             fin = r.get("financial_records", 0)
-            status_icon = {"success": "✓", "skipped": "–", "failed": "✗"}.get(r["status"], "?")
+            status_icon = {"success": "✓", "skipped": "–", "failed": "✗", "budget_paused": "$"}.get(r["status"], "?")
             cost_str = f"${r.get('cost_detail', {}).get('total', 0):.4f}"
             lines.append(f"  {status_icon} {r['company']:30s}  "
                          f"em={em:2d}  fin={fin:2d}  {cost_str}")
@@ -1544,8 +1618,10 @@ def _print_pipeline_summary(results, total_cost, total_elapsed_s):
     lines.append(f"  Total cost:  ${total_cost['total']:.4f}")
     lines.append(f"  Total time:  {total_elapsed_s / 60:.1f} min")
     lines.append(f"  API calls:   {total_cost['calls']}")
+    cache_read = total_cost.get("cache_read_tokens", 0)
+    cache_info = f" ({cache_read:,} cached)" if cache_read else ""
     lines.append(f"  Tokens:      {total_cost['input_tokens']:,} in / "
-                 f"{total_cost['output_tokens']:,} out")
+                 f"{total_cost['output_tokens']:,} out{cache_info}")
     lines.append("")
 
     for line in lines:
@@ -1565,6 +1641,9 @@ def process_company(
     skip_emissions: bool = False,
     skip_financial: bool = False,
     tiers: set[int] | None = None,
+    budget_per_company: float | None = None,
+    global_tracker: dict | None = None,
+    budget_global: float | None = None,
 ) -> dict:
     """Process a single company: walk backwards from TARGET_END_YEAR to fill gaps.
 
@@ -1580,7 +1659,12 @@ def process_company(
         tiers = {1, 2, 3}
     cost = _new_cost_tracker()
     raw_client = anthropic.Anthropic(api_key=anthropic_key)
-    client = _TrackedClient(raw_client, cost)
+    client = _TrackedClient(
+        raw_client, cost,
+        budget_limit=budget_per_company,
+        global_tracker=global_tracker,
+        global_limit=budget_global,
+    )
     company_name = company.name
     events = []
     t_start = time.time()
@@ -1689,6 +1773,7 @@ def process_company(
                 fin_history_search = search_for_financial_history(
                     company_name, anthropic_key, exa_key,
                     exclude_urls=list(fin_searched_urls),
+                    client=client,
                 )
                 candidates = fin_history_search.get("candidates", [fin_history_search])
                 url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
@@ -1897,6 +1982,20 @@ def process_company(
 # Pipeline orchestration
 # ══════════════════════════════════════════════════════════════════════════
 
+def _ask_continue(scope: str, spent: float, limit: float, company: str = "") -> bool:
+    """Prompt the user when a budget cap is hit. Returns True to continue."""
+    ctx = f" (during {company})" if company else ""
+    print(f"\n{'='*60}")
+    print(f"  ⚠  {scope} budget exceeded{ctx}")
+    print(f"     Spent: ${spent:.4f}  /  Limit: ${limit:.2f}")
+    print(f"{'='*60}")
+    try:
+        answer = input("  Continue? [y/N] ").strip().lower()
+        return answer in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def run_pipeline(
     database_url: str,
     anthropic_key: str,
@@ -1907,8 +2006,18 @@ def run_pipeline(
     skip_emissions: bool = False,
     skip_financial: bool = False,
     tiers: set[int] | None = None,
+    budget_per_company: float | None = None,
+    budget_global: float | None = None,
+    max_concurrent: int = 1,
 ):
     """Run the full pipeline across all (or specified) companies."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if budget_per_company is None:
+        budget_per_company = BUDGET_PER_COMPANY
+    if budget_global is None:
+        budget_global = BUDGET_GLOBAL
+
     session = get_session(database_url)
 
     if company_ids:
@@ -1918,6 +2027,9 @@ def run_pipeline(
 
     log.info(f"Starting pipeline for {len(companies)} companies "
              f"(target years: {TARGET_START_YEAR}–{TARGET_END_YEAR})")
+    log.info(f"  Budget: ${budget_per_company:.2f}/company, "
+             f"${budget_global:.2f} global, "
+             f"concurrency: {max_concurrent}")
 
     run = PipelineRun(
         total_companies=len(companies),
@@ -1930,54 +2042,133 @@ def run_pipeline(
     results = []
     total_cost = _new_cost_tracker()
     t_pipeline_start = time.time()
+    budget_stop = False
 
-    for i, company in enumerate(companies):
-        log.info(f"[{i + 1}/{len(companies)}] {company.name}")
+    def _process_one(company):
+        """Process a single company with its own DB session (thread-safe)."""
+        thread_session = get_session(database_url)
+        thread_company = thread_session.query(Company).get(company.id)
         try:
             result = process_company(
-                company, anthropic_key, exa_key, llama_key, session,
+                thread_company, anthropic_key, exa_key, llama_key, thread_session,
                 skip_emissions=skip_emissions, skip_financial=skip_financial,
                 tiers=tiers or {1, 2, 3},
+                budget_per_company=budget_per_company,
+                global_tracker=total_cost,
+                budget_global=budget_global,
             )
-            results.append(result)
-            cd = result.get("cost_detail", {})
-            for k in ("total", "calls", "input_tokens", "output_tokens"):
-                total_cost[k] += cd.get(k, 0)
+            thread_session.commit()
+            return result
+        except BudgetExceeded as be:
+            thread_session.commit()
+            raise be
         except Exception as e:
-            log.error(f"  FAILED: {e}")
-            errors.append(f"{company.name}: {e}")
-            results.append({"status": "failed", "company": company.name, "cost": 0})
-            session.rollback()
+            thread_session.rollback()
+            raise e
+        finally:
+            thread_session.close()
 
-        if i < len(companies) - 1:
-            time.sleep(delay_between)
+    if max_concurrent > 1:
+        # Concurrent processing
+        futures = {}
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            for i, company in enumerate(companies):
+                if budget_stop:
+                    break
+                log.info(f"[{i + 1}/{len(companies)}] Submitting {company.name}")
+                future = executor.submit(_process_one, company)
+                futures[future] = (i, company)
 
-        n_success = sum(1 for r in results if r["status"] == "success")
-        n_failed = sum(1 for r in results if r["status"] == "failed")
-        n_skipped = sum(1 for r in results if r["status"] == "skipped")
+            for future in as_completed(futures):
+                i, company = futures[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    cd = result.get("cost_detail", {})
+                    # total_cost already updated by global_tracker in _TrackedMessages
+                except BudgetExceeded as be:
+                    log.warning(f"  Budget hit during {company.name}: {be}")
+                    results.append({
+                        "status": "budget_paused", "company": company.name,
+                        "cost_detail": _new_cost_tracker(),
+                    })
+                    if _ask_continue(be.scope, be.spent, be.limit, company.name):
+                        budget_per_company = be.limit * 2
+                        budget_global = be.limit * 2
+                        log.info(f"  Continuing with doubled limits: "
+                                 f"${budget_per_company:.2f}/company, ${budget_global:.2f} global")
+                    else:
+                        budget_stop = True
+                        executor.shutdown(wait=False, cancel_futures=True)
+                except Exception as e:
+                    log.error(f"  FAILED {company.name}: {e}")
+                    errors.append(f"{company.name}: {e}")
+                    results.append({"status": "failed", "company": company.name,
+                                    "cost_detail": _new_cost_tracker()})
+    else:
+        # Sequential processing (original behaviour)
+        for i, company in enumerate(companies):
+            if budget_stop:
+                break
+            log.info(f"[{i + 1}/{len(companies)}] {company.name}")
+            try:
+                result = _process_one(company)
+                results.append(result)
+            except BudgetExceeded as be:
+                log.warning(f"  Budget hit: {be}")
+                results.append({
+                    "status": "budget_paused", "company": company.name,
+                    "cost_detail": _new_cost_tracker(),
+                })
+                if _ask_continue(be.scope, be.spent, be.limit, company.name):
+                    budget_per_company = be.limit * 2
+                    budget_global = be.limit * 2
+                    log.info(f"  Continuing with doubled limits: "
+                             f"${budget_per_company:.2f}/company, ${budget_global:.2f} global")
+                else:
+                    budget_stop = True
+                    break
+            except Exception as e:
+                log.error(f"  FAILED: {e}")
+                errors.append(f"{company.name}: {e}")
+                results.append({"status": "failed", "company": company.name,
+                                "cost_detail": _new_cost_tracker()})
+                session.rollback()
 
-        if (i + 1) % 10 == 0:
-            run.successful = n_success
-            run.failed = n_failed
-            run.skipped = n_skipped
-            session.commit()
+            if i < len(companies) - 1:
+                time.sleep(delay_between)
+
+            n_success = sum(1 for r in results if r["status"] == "success")
+            n_failed = sum(1 for r in results if r["status"] == "failed")
+            n_skipped = sum(1 for r in results if r["status"] == "skipped")
+
+            if (i + 1) % 10 == 0:
+                run.successful = n_success
+                run.failed = n_failed
+                run.skipped = n_skipped
+                session.commit()
 
     n_success = sum(1 for r in results if r["status"] == "success")
     n_failed = sum(1 for r in results if r["status"] == "failed")
     n_skipped = sum(1 for r in results if r["status"] == "skipped")
+    n_budget = sum(1 for r in results if r.get("status") == "budget_paused")
 
     run.successful = n_success
     run.failed = n_failed
     run.skipped = n_skipped
     run.completed_at = datetime.utcnow()
-    run.status = "completed"
+    run.status = "completed" if not budget_stop else "budget_stopped"
     run.error_log = "\n".join(errors) if errors else None
     session.commit()
 
     _print_pipeline_summary(results, total_cost, time.time() - t_pipeline_start)
+    if budget_stop:
+        log.info(f"  ⚠ Pipeline stopped by budget cap "
+                 f"({len(companies) - len(results)} companies remaining)")
 
     return {
         "successful": n_success,
         "failed": n_failed,
         "skipped": n_skipped,
+        "budget_paused": n_budget,
     }

@@ -269,12 +269,17 @@ def cmd_extract(args):
         skip_emissions=skip_emissions,
         skip_financial=skip_financial,
         tiers=tiers,
+        budget_per_company=args.company_budget,
+        budget_global=args.budget,
+        max_concurrent=args.concurrent,
     )
 
     print(f"\nPipeline run complete:")
     print(f"  Successful: {run['successful']}")
     print(f"  Failed:     {run['failed']}")
     print(f"  Skipped:    {run['skipped']}")
+    if run.get("budget_paused"):
+        print(f"  Budget paused: {run['budget_paused']}")
 
 
 def cmd_check(args):
@@ -434,6 +439,12 @@ def main():
                                 help="Financial: run only Tier 3 (Exa + PDF + LLM)")
     extract_parser.add_argument("--tierall", action="store_true",
                                 help="Financial: run all tiers (default)")
+    extract_parser.add_argument("--budget", type=float, default=None,
+                                help="Global budget cap in USD (default: $20)")
+    extract_parser.add_argument("--company-budget", type=float, default=None,
+                                help="Per-company budget cap in USD (default: $5)")
+    extract_parser.add_argument("--concurrent", type=int, default=1,
+                                help="Max companies to process concurrently (default: 1)")
 
     # check
     subparsers.add_parser("check", help="Run sanity checks")

@@ -62,12 +62,16 @@ def find_emissions_tables(
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=4096,
-        system=(
-            "You are an expert at identifying greenhouse gas emissions data in tables. "
-            "Given table previews, rank ALL tables from most to least likely to contain "
-            "Scope 1, 2, or 3 emissions data. Assign each a relevance score 0-100. "
-            "Every table must appear in the ranking."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are an expert at identifying greenhouse gas emissions data in tables. "
+                "Given table previews, rank ALL tables from most to least likely to contain "
+                "Scope 1, 2, or 3 emissions data. Assign each a relevance score 0-100. "
+                "Every table must appear in the ranking."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",
@@ -125,32 +129,36 @@ def extract_emissions(
     response = client.messages.create(
         model=model,
         max_tokens=8192,
-        system=(
-            "You are an expert at extracting greenhouse gas emissions data from tables "
-            "in sustainability reports. Extract Scope 1, Scope 2 (both location-based and "
-            "market-based if available), and Scope 3 emissions for EVERY year present in the "
-            "table — including prior-year comparison columns and historical trend data. "
-            "Many reports show 2-5 years side by side; extract ALL of them, not just the "
-            "most recent. "
-            "Normalise all values to the same unit (prefer tonnes CO2e). "
-            "If the table uses kt or Mt, convert to tonnes. "
-            "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
-            "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
-            "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
-            "per employee), or index values. If a cell contains '50%' or "
-            "'50% reduction', that is NOT an emissions value of 50. "
-            "NEVER split or divide a combined 'Scope 1 + 2' or 'Scope 1 and 2' value "
-            "to estimate individual Scope 1 and Scope 2 figures. If only a combined "
-            "Scope 1+2 total is given, set both scope_1 and scope_2_location to null. "
-            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
-            "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
-            "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
-            "For example, 'year ended 31 March 2025' means period_start='2024-04-01', "
-            "period_end='2025-03-31'. If not stated, set both to null. "
-            "Note any methodology information, restatements, or caveats. "
-            "If a scope is not present in the table, set its value to null. "
-            "Be precise — extract the exact numbers from the table."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are an expert at extracting greenhouse gas emissions data from tables "
+                "in sustainability reports. Extract Scope 1, Scope 2 (both location-based and "
+                "market-based if available), and Scope 3 emissions for EVERY year present in the "
+                "table — including prior-year comparison columns and historical trend data. "
+                "Many reports show 2-5 years side by side; extract ALL of them, not just the "
+                "most recent. "
+                "Normalise all values to the same unit (prefer tonnes CO2e). "
+                "If the table uses kt or Mt, convert to tonnes. "
+                "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
+                "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
+                "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
+                "per employee), or index values. If a cell contains '50%' or "
+                "'50% reduction', that is NOT an emissions value of 50. "
+                "NEVER split or divide a combined 'Scope 1 + 2' or 'Scope 1 and 2' value "
+                "to estimate individual Scope 1 and Scope 2 figures. If only a combined "
+                "Scope 1+2 total is given, set both scope_1 and scope_2_location to null. "
+                "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+                "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
+                "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
+                "For example, 'year ended 31 March 2025' means period_start='2024-04-01', "
+                "period_end='2025-03-31'. If not stated, set both to null. "
+                "Note any methodology information, restatements, or caveats. "
+                "If a scope is not present in the table, set its value to null. "
+                "Be precise — extract the exact numbers from the table."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",
@@ -184,26 +192,30 @@ def extract_emissions_from_text(
     response = client.messages.create(
         model=model,
         max_tokens=8192,
-        system=(
-            "You are an expert at extracting greenhouse gas emissions data from documents. "
-            "Extract Scope 1, Scope 2 (both location-based and market-based if available), "
-            "and Scope 3 emissions for ALL years mentioned. "
-            "Normalise all values to tonnes CO2e. "
-            "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
-            "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
-            "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
-            "per employee), or index values. If the text says '50%' or "
-            "'50% reduction', that is NOT an emissions value of 50. "
-            "NEVER split or divide a combined 'Scope 1 + 2' or 'Scope 1 and 2' value "
-            "to estimate individual Scope 1 and Scope 2 figures. If only a combined "
-            "Scope 1+2 total is given, set both scope_1 and scope_2_location to null. "
-            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
-            "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
-            "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
-            "If not stated, set both to null. "
-            "If a scope is not found, set its value to null. "
-            "Be precise — extract exact numbers only, do not estimate."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are an expert at extracting greenhouse gas emissions data from documents. "
+                "Extract Scope 1, Scope 2 (both location-based and market-based if available), "
+                "and Scope 3 emissions for ALL years mentioned. "
+                "Normalise all values to tonnes CO2e. "
+                "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
+                "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
+                "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
+                "per employee), or index values. If the text says '50%' or "
+                "'50% reduction', that is NOT an emissions value of 50. "
+                "NEVER split or divide a combined 'Scope 1 + 2' or 'Scope 1 and 2' value "
+                "to estimate individual Scope 1 and Scope 2 figures. If only a combined "
+                "Scope 1+2 total is given, set both scope_1 and scope_2_location to null. "
+                "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+                "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
+                "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
+                "If not stated, set both to null. "
+                "If a scope is not found, set its value to null. "
+                "Be precise — extract exact numbers only, do not estimate."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",
@@ -302,33 +314,37 @@ def extract_emissions_from_pdf(
     response = client.messages.create(
         model=model,
         max_tokens=8192,
-        system=(
-            "You are an expert at extracting greenhouse gas emissions data from "
-            "sustainability reports. You are given a PDF document (or a subset of pages "
-            "from a larger report). "
-            "Extract Scope 1, Scope 2 (both location-based and market-based if available), "
-            "and Scope 3 emissions for EVERY year present in the document — including "
-            "prior-year comparison columns and historical trend data. "
-            "Normalise all values to the same unit (prefer tonnes CO2e). "
-            "If the document uses kt or Mt, convert to tonnes. "
-            "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
-            "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
-            "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
-            "per employee), or index values. If a cell contains '50%' or "
-            "'50% reduction', that is NOT an emissions value of 50. "
-            "NEVER split or divide a combined 'Scope 1 + 2' or 'Scope 1 and 2' value "
-            "to estimate individual Scope 1 and Scope 2 figures. If only a combined "
-            "Scope 1+2 total is given, set both scope_1 and scope_2_location to null. "
-            "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
-            "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
-            "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
-            "If not stated, set both to null. "
-            + page_instruction +
-            "If a scope is not present, set its value to null. "
-            "If the document does not contain any emissions data, return an empty "
-            "emissions array. "
-            "Be precise — read the exact numbers from the document."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are an expert at extracting greenhouse gas emissions data from "
+                "sustainability reports. You are given a PDF document (or a subset of pages "
+                "from a larger report). "
+                "Extract Scope 1, Scope 2 (both location-based and market-based if available), "
+                "and Scope 3 emissions for EVERY year present in the document — including "
+                "prior-year comparison columns and historical trend data. "
+                "Normalise all values to the same unit (prefer tonnes CO2e). "
+                "If the document uses kt or Mt, convert to tonnes. "
+                "CRITICAL: Only extract ABSOLUTE emissions values with units like tonnes CO2e, "
+                "MtCO2e, ktCO2e, GtCO2e etc. Do NOT extract: percentage values (%), reduction "
+                "targets, percentage changes, emissions intensity ratios (e.g. per revenue, "
+                "per employee), or index values. If a cell contains '50%' or "
+                "'50% reduction', that is NOT an emissions value of 50. "
+                "NEVER split or divide a combined 'Scope 1 + 2' or 'Scope 1 and 2' value "
+                "to estimate individual Scope 1 and Scope 2 figures. If only a combined "
+                "Scope 1+2 total is given, set both scope_1 and scope_2_location to null. "
+                "IMPORTANT: Identify the reporting period for each year. Look for phrases like "
+                "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
+                "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
+                "If not stated, set both to null. "
+                + page_instruction +
+                "If a scope is not present, set its value to null. "
+                "If the document does not contain any emissions data, return an empty "
+                "emissions array. "
+                "Be precise — read the exact numbers from the document."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",
@@ -424,13 +440,17 @@ def verify_page_contains_values(
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,
-        system=(
-            "You are checking whether a single page from a sustainability report "
-            "contains specific greenhouse gas emissions values. Look at the page "
-            "and answer whether the stated values appear on it. The values may be "
-            "in a table or in running text. They may appear in different units "
-            f"(e.g. Mt CO2e vs tonnes CO2e) — check for equivalent values."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are checking whether a single page from a sustainability report "
+                "contains specific greenhouse gas emissions values. Look at the page "
+                "and answer whether the stated values appear on it. The values may be "
+                "in a table or in running text. They may appear in different units "
+                "(e.g. Mt CO2e vs tonnes CO2e) — check for equivalent values."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",

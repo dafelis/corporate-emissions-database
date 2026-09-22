@@ -33,6 +33,7 @@ def _search_and_rank(
     exa_key: str,
     anthropic_key: str,
     exclude_urls: list[str] = None,
+    client=None,
 ) -> dict:
     """Generic search + rank helper.
 
@@ -54,7 +55,8 @@ def _search_and_rank(
     other_results = [r for r in results if not r.url.lower().split("?")[0].endswith(".pdf")]
     sorted_results = pdf_results + other_results
 
-    client = anthropic.Anthropic(api_key=anthropic_key)
+    if client is None:
+        client = anthropic.Anthropic(api_key=anthropic_key)
 
     results_text = "\n".join(
         f"{i + 1}. Title: {r.title or '(no title)'}\n   URL: {r.url}"
@@ -64,6 +66,11 @@ def _search_and_rank(
     response_msg = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,
+        system=[{
+            "type": "text",
+            "text": "You rank search results by relevance to the user's query.",
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[
             {
                 "role": "user",
@@ -100,6 +107,7 @@ def search_for_emissions_source(
     exa_key: str,
     target_year: int = None,
     exclude_urls: list[str] = None,
+    client=None,
 ) -> dict:
     """Search for a company's sustainability/emissions report.
 
@@ -151,6 +159,7 @@ def search_for_emissions_source(
         exa_key=exa_key,
         anthropic_key=anthropic_key,
         exclude_urls=exclude_urls,
+        client=client,
     )
 
 
@@ -160,6 +169,7 @@ def search_for_annual_report(
     exa_key: str,
     target_year: int = None,
     exclude_urls: list[str] = None,
+    client=None,
 ) -> dict:
     """Search for a company's annual report / financial statements.
 
@@ -217,6 +227,7 @@ def search_for_annual_report(
         exa_key=exa_key,
         anthropic_key=anthropic_key,
         exclude_urls=exclude_urls,
+        client=client,
     )
 
 
@@ -225,6 +236,7 @@ def search_for_financial_history(
     anthropic_key: str,
     exa_key: str,
     exclude_urls: list[str] = None,
+    client=None,
 ) -> dict:
     """Search for a multi-year financial summary (five-year record, key financials page).
 
@@ -262,4 +274,5 @@ def search_for_financial_history(
         exa_key=exa_key,
         anthropic_key=anthropic_key,
         exclude_urls=exclude_urls,
+        client=client,
     )
