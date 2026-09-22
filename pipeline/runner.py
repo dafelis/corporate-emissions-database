@@ -1084,6 +1084,18 @@ def _extract_financials_from_document(
     return saved
 
 
+def _debt_components_json(entry: dict) -> str | None:
+    """Extract gross_debt component details from provenance for storage."""
+    prov = entry.get("provenance", {}).get("gross_debt", {})
+    if isinstance(prov, dict) and prov.get("components"):
+        return json.dumps(prov["components"])
+    # Fallback to entry-level components
+    debt_obj = entry.get("gross_debt")
+    if isinstance(debt_obj, dict) and debt_obj.get("components"):
+        return json.dumps(debt_obj["components"])
+    return None
+
+
 def _save_api_financial_entries(
     entries: list[dict],
     company,
@@ -1246,10 +1258,7 @@ def _save_api_financial_entries(
             revenue_ref=_fref("revenue"),
             revenue_confidence=_fconf("revenue"),
             gross_debt=new_gross_debt,
-            gross_debt_components=(
-                json.dumps(debt_obj["components"])
-                if isinstance(debt_obj, dict) and debt_obj.get("components")
-                else None),
+            gross_debt_components=_debt_components_json(entry),
             gross_debt_ref=_fref("gross_debt"),
             gross_debt_confidence=_fconf("gross_debt"),
             lease_liabilities=new_lease_liab,
@@ -1735,7 +1744,7 @@ def process_company(
             try:
                 yf_source = Source(
                     company_id=company.id,
-                    url=f"yfinance:{company.ticker}",
+                    url=f"https://finance.yahoo.com/quote/{company.ticker}/",
                     title=f"Yahoo Finance market data ({company.ticker})",
                     document_type="api",
                 )
@@ -1752,6 +1761,25 @@ def process_company(
                         fr.share_price_at_fy_end = equity_data["share_price"]
                         fr.equity_currency = equity_data["currency"]
                         fr.market_data_source_id = yf_source.id
+                        # Store equity provenance
+                        try:
+                            notes_data = json.loads(fr.extraction_notes) if fr.extraction_notes else {}
+                        except (json.JSONDecodeError, TypeError):
+                            notes_data = {}
+                        prov = notes_data.get("provenance", {})
+                        prov["equity_value"] = {
+                            "concept": "market_cap",
+                            "value": equity_data["market_cap"],
+                            "unit": f"iso4217:{equity_data['currency']}",
+                            "period": str(target_date),
+                            "calculated": False,
+                            "ticker": company.ticker,
+                            "share_price": equity_data["share_price"],
+                            "shares": equity_data["shares_outstanding"],
+                        }
+                        notes_data["provenance"] = prov
+                        notes_data["entity_name"] = notes_data.get("entity_name", company.name)
+                        fr.extraction_notes = json.dumps(notes_data)
                         # Legacy enterprise_value
                         if fr.outstanding_debt is not None and fr.cash_and_equivalents is not None:
                             fr.enterprise_value = (

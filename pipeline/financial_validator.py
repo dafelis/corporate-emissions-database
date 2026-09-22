@@ -117,5 +117,54 @@ def compute_evic(record):
     if record.non_controlling_interests is None:
         flags.append("EVIC: NCI missing, treated as 0")
 
+    # Merge EVIC provenance into extraction_notes
+    try:
+        notes_data = json.loads(record.extraction_notes) if record.extraction_notes else {}
+    except (json.JSONDecodeError, TypeError):
+        notes_data = {}
+    prov = notes_data.get("provenance", {})
+
+    # Pull period info from existing provenance entries
+    equity_prov = prov.get("equity_value", {})
+    debt_prov = prov.get("gross_debt", {})
+    nci_prov = prov.get("non_controlling_interests", {})
+    equity_period = equity_prov.get("period", "")
+    debt_period = debt_prov.get("period", "")
+    nci_period = nci_prov.get("period", "")
+    evic_unit = equity_prov.get("unit", debt_prov.get("unit", ""))
+
+    evic_prov = {
+        "concept": "EVIC",
+        "value": evic,
+        "unit": evic_unit,
+        "calculated": True,
+        "components": [],
+    }
+    if market_cap is not None:
+        evic_prov["components"].append({
+            "concept": "Equity",
+            "value": market_cap,
+            "calculated": False,
+            "period": equity_period,
+        })
+    if debt:
+        evic_prov["components"].append({
+            "concept": "Gross Debt",
+            "value": debt,
+            "calculated": bool(record.gross_debt_ref and "+" in str(record.gross_debt_ref)),
+            "period": debt_period,
+        })
+    if nci:
+        evic_prov["components"].append({
+            "concept": "Non-controlling Interests",
+            "value": nci,
+            "calculated": False,
+            "period": nci_period,
+        })
+
+    prov["evic"] = evic_prov
+    notes_data["provenance"] = prov
+    record.extraction_notes = json.dumps(notes_data)
+
     record.validation_flags = json.dumps(flags) if flags else None
     return evic

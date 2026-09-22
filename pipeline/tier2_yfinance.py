@@ -134,17 +134,42 @@ def extract_financials_from_yfinance(ticker: str, company_name: str) -> list[dic
         if all(v is None for v in [gross_debt, revenue, shares]):
             continue
 
+        def _yfprov(label, val):
+            if val is None:
+                return None
+            return {
+                "concept": f"yfinance:{label}",
+                "value": val,
+                "unit": f"iso4217:{currency}" if currency else "",
+                "period": fy_date.isoformat(),
+                "calculated": False,
+            }
+
+        provenance = {}
+        for field, label, val in [
+            ("revenue", "TotalRevenue", revenue),
+            ("gross_debt", "TotalDebt", gross_debt),
+            ("lease_liabilities", "CapitalLeaseObligations", lease_liab),
+            ("non_controlling_interests", "MinorityInterest", nci),
+            ("preference_shares", "PreferredStock", pref),
+            ("shares_outstanding", "OrdinarySharesNumber", shares),
+        ]:
+            prov = _yfprov(label, val)
+            if prov:
+                provenance[field] = prov
+
         entry = {
             "reporting_year": year,
             "reporting_date": fy_date.isoformat(),
             "currency": currency,
             "unit_multiplier": 1,
-            "gross_debt": {"value": gross_debt, "components": [], "ref": "yfinance", "confidence": "medium"},
-            "lease_liabilities": {"value": lease_liab, "label": "CapitalLeaseObligations", "ref": "yfinance", "confidence": "medium"},
-            "non_controlling_interests": {"value": nci, "label": "MinorityInterest", "ref": "yfinance", "confidence": "medium"},
-            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": "yfinance"},
-            "shares_outstanding": {"value": shares, "share_class": "", "ref": "yfinance", "confidence": "medium"},
-            "revenue": {"value": revenue, "label": "TotalRevenue", "ref": "yfinance", "confidence": "medium"},
+            "provenance": provenance,
+            "gross_debt": {"value": gross_debt, "components": [], "ref": "yfinance:TotalDebt", "confidence": "medium"},
+            "lease_liabilities": {"value": lease_liab, "label": "CapitalLeaseObligations", "ref": "yfinance:CapitalLeaseObligations", "confidence": "medium"},
+            "non_controlling_interests": {"value": nci, "label": "MinorityInterest", "ref": "yfinance:MinorityInterest", "confidence": "medium"},
+            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": "yfinance:PreferredStock"},
+            "shares_outstanding": {"value": shares, "share_class": "", "ref": "yfinance:OrdinarySharesNumber", "confidence": "medium"},
+            "revenue": {"value": revenue, "label": "TotalRevenue", "ref": "yfinance:TotalRevenue", "confidence": "medium"},
             "is_financial_institution": False,
             "notes": ["Tier 2: extracted from yfinance structured data"],
         }

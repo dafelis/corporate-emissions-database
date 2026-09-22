@@ -116,6 +116,7 @@ def _pick_value(index: dict, concept_set: set[str]) -> tuple[float | None, dict 
                 "period": dims.get("period", ""),
                 "decimals": f.get("decimals"),
                 "entity": dims.get("entity", ""),
+                "calculated": False,
             }
             return fval, prov
     return None, None
@@ -140,6 +141,7 @@ def _sum_pairs(index: dict, pairs: list[tuple[str, str]]) -> tuple[float | None,
                 "period": (pa or pb or {}).get("period", ""),
                 "decimals": (pa or pb or {}).get("decimals"),
                 "entity": (pa or pb or {}).get("entity", ""),
+                "calculated": True,
                 "components": parts,
             }
             return (va or 0) + (vb or 0), prov

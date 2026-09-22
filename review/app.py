@@ -115,12 +115,20 @@ def _build_provenance_data(financial_records):
         entity_name = notes_obj.get("entity_name", "")
         lei = notes_obj.get("lei", "")
         src_id = str(fin.source_id) if fin.source_id else None
-        if not src_id or not provenance:
+        mkt_src_id = str(fin.market_data_source_id) if getattr(fin, "market_data_source_id", None) else None
+        if not provenance:
             continue
         for field, prov in provenance.items():
             if not isinstance(prov, dict):
                 continue
-            key = f"{src_id}:{field}"
+            # equity_value and evic use market_data_source_id
+            if field in ("equity_value", "evic"):
+                use_id = mkt_src_id
+            else:
+                use_id = src_id
+            if not use_id:
+                continue
+            key = f"{use_id}:{field}"
             entry = {
                 "lei": lei,
                 "entity_name": entity_name,
@@ -130,6 +138,11 @@ def _build_provenance_data(financial_records):
                 "period": prov.get("period", ""),
                 "decimals": prov.get("decimals"),
                 "year": fin.reporting_year,
+                "calculated": prov.get("calculated", False),
+                "components": prov.get("components", []),
+                "ticker": prov.get("ticker", ""),
+                "share_price": prov.get("share_price"),
+                "shares": prov.get("shares"),
             }
             prov_data[key] = entry
     return prov_data
@@ -211,13 +224,16 @@ _POPUP_STYLES = """
     display:none; position:fixed;
     top:0; left:0; right:0; bottom:0;
     background:rgba(0,0,0,0.85); z-index:2000;
-    cursor:zoom-out; align-items:center; justify-content:center;
+    cursor:zoom-out; overflow:auto;
+    padding:20px;
 }
-.img-lightbox.open { display:flex; }
+.img-lightbox.open { display:flex; align-items:flex-start; justify-content:center; }
 .img-lightbox img {
-    max-width:95vw; max-height:95vh;
+    max-width:95vw;
+    width:auto; height:auto;
     object-fit:contain; border-radius:4px;
     box-shadow:0 4px 24px rgba(0,0,0,0.5);
+    margin:auto;
 }
 @media (prefers-color-scheme: dark) {
     .source-modal { background:#1e1e2e; }
@@ -276,21 +292,68 @@ function showSource(sid,field){
         var pk=String(sid)+':'+field;
         var pv=PROVENANCE[pk];
         if(pv){
-            h+='<table style="margin-top:14px;font-size:13px;border-collapse:collapse;width:100%">';
-            var rows=[
-                ['LEI',pv.lei||'—'],
-                ['Entity name',pv.entity_name||'—'],
-                ['XBRL concept','<code>'+esc(pv.concept)+'</code>'],
-                ['Value',fmtNum(pv.value)+' <span style="color:#888">(raw: '+(pv.value!=null?pv.value.toLocaleString():'—')+')</span>'],
-                ['Unit',esc((pv.unit||'').replace('iso4217:',''))],
-                ['Period',fmtPeriod(pv.period)],
-                ['Decimals',pv.decimals!=null?String(pv.decimals):'—']
-            ];
-            for(var i=0;i<rows.length;i++){
-                h+='<tr><td style="padding:4px 10px 4px 0;color:#888;white-space:nowrap;vertical-align:top">'+rows[i][0]+'</td>';
-                h+='<td style="padding:4px 0;font-weight:500">'+rows[i][1]+'</td></tr>';
+            if(pv.calculated && pv.components && pv.components.length>0){
+                // Show calculation formula with full detail
+                var formula=field.replace(/_/g,' ');
+                formula=formula.charAt(0).toUpperCase()+formula.slice(1);
+                h+='<div style="margin-top:14px;padding:14px;background:#f0f7ff;border-radius:6px;border:1px solid #d0e3f7">';
+                h+='<div style="font-size:11px;text-transform:uppercase;color:#666;margin-bottom:8px;letter-spacing:0.5px">Calculated value</div>';
+                // Formula line
+                var fparts=[];
+                for(var ci=0;ci<pv.components.length;ci++){
+                    var comp=pv.components[ci];
+                    var cname=comp.concept||'?';
+                    cname=cname.replace(/^ifrs-full:/,'').replace(/^us-gaap:/,'').replace(/^yfinance:/,'');
+                    fparts.push(cname+' ('+fmtNum(comp.value)+')');
+                }
+                h+='<div style="font-size:14px;font-weight:600;margin-bottom:10px">'+esc(formula)+' = '+fparts.join(' + ')+'</div>';
+                // Unit
+                var calcUnit=(pv.unit||'').replace('iso4217:','');
+                if(calcUnit) h+='<div style="font-size:12px;color:#555;margin-bottom:4px">Units: '+esc(calcUnit)+'</div>';
+                // Per-component periods
+                for(var ci2=0;ci2<pv.components.length;ci2++){
+                    var comp2=pv.components[ci2];
+                    var cn2=comp2.concept||'?';
+                    cn2=cn2.replace(/^ifrs-full:/,'').replace(/^us-gaap:/,'').replace(/^yfinance:/,'');
+                    var cp2=comp2.period||pv.period||'';
+                    if(cp2) h+='<div style="font-size:12px;color:#555">Period — '+esc(cn2)+': '+fmtPeriod(cp2)+'</div>';
+                }
+                h+='</div>';
+            } else if(field==='equity_value'){
+                // Equity-specific provenance
+                h+='<table style="margin-top:14px;font-size:13px;border-collapse:collapse;width:100%">';
+                var eqRows=[
+                    ['Identifier',pv.ticker?'Yahoo Finance: '+esc(pv.ticker):'—'],
+                    ['Company',pv.entity_name||'—'],
+                    ['Date',fmtPeriod(pv.period)],
+                    ['Currency',esc((pv.unit||'').replace('iso4217:',''))],
+                    ['Market cap',fmtNum(pv.value)+' <span style="color:#888">(raw: '+(pv.value!=null?pv.value.toLocaleString():'—')+')</span>'],
+                ];
+                if(pv.share_price!=null) eqRows.push(['Share price',pv.share_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})]);
+                if(pv.shares!=null) eqRows.push(['Shares outstanding',pv.shares.toLocaleString()]);
+                for(var ei=0;ei<eqRows.length;ei++){
+                    h+='<tr><td style="padding:4px 10px 4px 0;color:#888;white-space:nowrap;vertical-align:top">'+eqRows[ei][0]+'</td>';
+                    h+='<td style="padding:4px 0;font-weight:500">'+eqRows[ei][1]+'</td></tr>';
+                }
+                h+='</table>';
+            } else {
+                // Standard provenance table for directly extracted values
+                h+='<table style="margin-top:14px;font-size:13px;border-collapse:collapse;width:100%">';
+                var rows=[
+                    ['LEI',pv.lei||'—'],
+                    ['Entity name',pv.entity_name||'—'],
+                    ['XBRL concept','<code>'+esc(pv.concept)+'</code>'],
+                    ['Value',fmtNum(pv.value)+' <span style="color:#888">(raw: '+(pv.value!=null?pv.value.toLocaleString():'—')+')</span>'],
+                    ['Unit',esc((pv.unit||'').replace('iso4217:',''))],
+                    ['Period',fmtPeriod(pv.period)],
+                    ['Decimals',pv.decimals!=null?String(pv.decimals):'—']
+                ];
+                for(var i=0;i<rows.length;i++){
+                    h+='<tr><td style="padding:4px 10px 4px 0;color:#888;white-space:nowrap;vertical-align:top">'+rows[i][0]+'</td>';
+                    h+='<td style="padding:4px 0;font-weight:500">'+rows[i][1]+'</td></tr>';
+                }
+                h+='</table>';
             }
-            h+='</table>';
         }
     }
     if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'" onclick="expandImg(this.src)" title="Click to expand"></div>';
@@ -405,8 +468,8 @@ def render_data_table():
     fin_fields = [
         ("Revenue", "revenue", "financial"),
         ("Gross Debt", "gross_debt", "financial"),
-        ("Equity", "equity_value", "financial"),
-        ("EVIC", "evic", "financial"),
+        ("Equity", "equity_value", "market"),
+        ("EVIC (calc)", "evic", "market"),
     ]
 
     fields = []
@@ -554,6 +617,10 @@ def render_data_table():
                     value = getattr(em, field_name, None) if em else None
                     status = em.review_status if em else None
                     src_id = em.source_id if em else None
+                elif source_type == "market":
+                    value = getattr(fin, field_name, None) if fin else None
+                    status = fin.review_status if fin else None
+                    src_id = getattr(fin, "market_data_source_id", None) if fin else None
                 else:
                     value = getattr(fin, field_name, None) if fin else None
                     status = fin.review_status if fin else None
@@ -561,20 +628,10 @@ def render_data_table():
 
                 if value is not None:
                     css_class = "approved" if status == "approved" else "not-approved"
-                    # Market-derived fields use market_data_source_id
-                    if field_name in ("equity_value", "evic"):
-                        mkt_src_id = getattr(fin, "market_data_source_id", None) if fin else None
-                        if mkt_src_id:
-                            html_parts.append(
-                                f"<td class='{css_class} has-source' "
-                                f"onclick='showSource({mkt_src_id})'>{fmt_num(value)}</td>"
-                            )
-                        else:
-                            html_parts.append(f"<td class='{css_class}'>{fmt_num(value)}</td>")
-                    elif src_id:
+                    if src_id:
                         html_parts.append(
                             f"<td class='{css_class} has-source' "
-                            f"onclick='showSource({src_id})'>{fmt_num(value)}</td>"
+                            f"onclick=\"showSource({src_id},'{field_name}')\">{fmt_num(value)}</td>"
                         )
                     else:
                         html_parts.append(f"<td class='{css_class}'>{fmt_num(value)}</td>")
@@ -599,8 +656,9 @@ def render_data_table():
 
     html_parts.append("</tbody></table></div>")
 
-    # Append modal + JS
-    html_parts.append(_source_popup_block(source_data))
+    # Append modal + JS (with provenance)
+    dt_provenance = _build_provenance_data(financials)
+    html_parts.append(_source_popup_block(source_data, dt_provenance))
 
     # Render via components.html (iframe with JS support)
     table_height = max(500, 100 + n_visible * 35)
@@ -886,14 +944,28 @@ def render_review():
                 ref = ref.replace(prefix, "")
             return ref
 
+        # Parse provenance for calculated-field labelling
+        _prov_fields = {}
+        try:
+            _notes_obj = json.loads(fin_record.extraction_notes) if _fa("extraction_notes") else {}
+            _prov_fields = _notes_obj.get("provenance", {}) if isinstance(_notes_obj, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        def _calc_label(base, field_key):
+            p = _prov_fields.get(field_key, {})
+            if isinstance(p, dict) and p.get("calculated"):
+                return base + " (calc)"
+            return base
+
         fin_col1, fin_col2 = st.columns(2)
         with fin_col1:
             st.markdown("**PCAF EVIC inputs (from filings):**")
             pcaf_rows = [
-                ("Revenue", _fa("revenue"), _fa("revenue_confidence"), _fa("revenue_ref")),
-                ("Gross debt", _fa("gross_debt"), _fa("gross_debt_confidence"), _fa("gross_debt_ref")),
-                ("Lease liabilities", _fa("lease_liabilities"), _fa("lease_liabilities_confidence"), _fa("lease_liabilities_ref")),
-                ("Non-controlling interests", _fa("non_controlling_interests"), _fa("nci_confidence"), _fa("nci_ref")),
+                (_calc_label("Revenue", "revenue"), _fa("revenue"), _fa("revenue_confidence"), _fa("revenue_ref")),
+                (_calc_label("Gross debt", "gross_debt"), _fa("gross_debt"), _fa("gross_debt_confidence"), _fa("gross_debt_ref")),
+                (_calc_label("Lease liabilities", "lease_liabilities"), _fa("lease_liabilities"), _fa("lease_liabilities_confidence"), _fa("lease_liabilities_ref")),
+                (_calc_label("NCI", "non_controlling_interests"), _fa("non_controlling_interests"), _fa("nci_confidence"), _fa("nci_ref")),
                 ("Preference shares", _fa("preference_shares"), None, _fa("preference_shares_ref")),
                 ("Shares outstanding", _fa("shares_outstanding"), _fa("shares_outstanding_confidence"), _fa("shares_outstanding_ref")),
             ]
@@ -907,7 +979,20 @@ def render_review():
                 try:
                     components_list = json.loads(fin_record.gross_debt_components)
                     if components_list:
-                        st.caption(f"Debt components: {', '.join(components_list)}")
+                        parts = []
+                        for comp in components_list:
+                            if isinstance(comp, dict):
+                                cname = comp.get("concept", "?")
+                                for pfx in ("ifrs-full:", "us-gaap:", "yfinance:"):
+                                    cname = cname.replace(pfx, "")
+                                cval = comp.get("value")
+                                if cval is not None:
+                                    parts.append(f"{cname} ({cval:,.0f})")
+                                else:
+                                    parts.append(cname)
+                            else:
+                                parts.append(str(comp))
+                        st.caption(f"Gross debt = {' + '.join(parts)}")
                 except (json.JSONDecodeError, TypeError):
                     pass
             if _fa("is_financial_institution"):
@@ -916,7 +1001,7 @@ def render_review():
         with fin_col2:
             st.markdown("**Market data + EVIC:**")
             st.table(pd.DataFrame({
-                "Metric": ["Equity value (market cap)", "EVIC"],
+                "Metric": ["Equity value (market cap)", "EVIC (calculated)"],
                 "Value": [
                     _fmt_currency(_fa("equity_value"), _fa("equity_currency")),
                     _fmt_currency(_fa("evic"), _fa("equity_currency") or ccy),
@@ -1160,17 +1245,54 @@ def render_single_company():
         ("S2 mkt", "scope_2_market", "emissions"),
         ("S3", "scope_3", "emissions"),
         ("Revenue", "revenue", "financial"),
-        ("Gross Debt", "gross_debt", "financial"),
+        ("LT Debt", "_debt_lt", "debt_component"),
+        ("ST Debt", "_debt_st", "debt_component"),
+        ("Gross Debt (calc)", "gross_debt", "financial"),
         ("Lease Liab.", "lease_liabilities", "financial"),
         ("NCI", "non_controlling_interests", "financial"),
         ("Pref Shares", "preference_shares", "financial"),
         ("Shares Out", "shares_outstanding", "financial"),
-        ("Equity", "equity_value", "financial"),
-        ("EVIC", "evic", "financial"),
+        ("Equity", "equity_value", "market"),
+        ("EVIC (calc)", "evic", "market"),
         ("Tier", "source_tier", "financial"),
         ("Em. Basis", "_em_basis", "basis"),
         ("Fin. Basis", "_fin_basis", "basis"),
     ]
+
+    # Pre-extract debt component values per year from provenance
+    def _get_debt_components(fin_record):
+        """Extract LT and ST debt component values and provenance from a financial record."""
+        if not fin_record:
+            return None, None, None, None
+        comps_raw = getattr(fin_record, "gross_debt_components", None)
+        if not comps_raw:
+            return None, None, None, None
+        try:
+            comps = json.loads(comps_raw)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, None, None
+        lt_val = st_val = None
+        lt_concept = st_concept = None
+        for comp in comps:
+            if not isinstance(comp, dict):
+                continue
+            concept = comp.get("concept", "").lower()
+            val = comp.get("value")
+            if any(kw in concept for kw in ("noncurrent", "longterm", "long_term", "longtermdebt")):
+                lt_val = val
+                lt_concept = comp.get("concept", "")
+            elif any(kw in concept for kw in ("current", "shortterm", "short_term", "shorttermborr")):
+                st_val = val
+                st_concept = comp.get("concept", "")
+        return lt_val, lt_concept, st_val, st_concept
+
+    debt_components_by_year = {}
+    for year_key, fin_rec in fin_by_year.items():
+        lt, lt_c, st, st_c = _get_debt_components(fin_rec)
+        debt_components_by_year[year_key] = {
+            "lt_val": lt, "lt_concept": lt_c,
+            "st_val": st, "st_concept": st_c,
+        }
 
     # ── Build HTML table ──────────────────────────────────────────────
     html = []
@@ -1253,28 +1375,62 @@ def render_single_company():
                         html.append(f"<td>{fmt(value)}</td>")
                 else:
                     html.append("<td class='no-data'>—</td>")
-            else:  # financial
-                value = getattr(fin, field_name, None) if fin else None
+            elif source_type == "debt_component":
+                # Derived from gross_debt_components JSON
+                dc = debt_components_by_year.get(year, {})
+                if field_name == "_debt_lt":
+                    value = dc.get("lt_val")
+                    dc_concept = dc.get("lt_concept", "")
+                else:
+                    value = dc.get("st_val")
+                    dc_concept = dc.get("st_concept", "")
                 src_id = fin.source_id if fin else None
+                if value is not None and src_id:
+                    # Build a provenance key for the component — reuse the gross_debt source
+                    html.append(
+                        f"<td class='has-source' onclick=\"showSource({src_id},'gross_debt')\">"
+                        f"{fmt(value)}</td>"
+                    )
+                elif value is not None:
+                    html.append(f"<td>{fmt(value)}</td>")
+                else:
+                    html.append("<td class='no-data'>—</td>")
+            elif source_type == "market":
+                # Equity and EVIC use market_data_source_id
+                value = getattr(fin, field_name, None) if fin else None
+                mkt_src_id = getattr(fin, "market_data_source_id", None) if fin else None
                 if value is not None:
-                    if field_name in ("equity_value", "evic"):
-                        mkt_src_id = getattr(fin, "market_data_source_id", None) if fin else None
-                        if mkt_src_id:
-                            html.append(
-                                f"<td class='has-source' onclick='showSource({mkt_src_id})'>"
-                                f"{fmt(value)}</td>"
-                            )
-                        else:
-                            html.append(f"<td>{fmt(value)}</td>")
-                    elif field_name == "source_tier":
-                        html.append(f"<td style='text-align:center'>{int(value)}</td>")
-                    elif src_id:
+                    if mkt_src_id:
                         html.append(
-                            f"<td class='has-source' onclick=\"showSource({src_id},'{field_name}')\">"
+                            f"<td class='has-source' onclick=\"showSource({mkt_src_id},'{field_name}')\">"
                             f"{fmt(value)}</td>"
                         )
                     else:
                         html.append(f"<td>{fmt(value)}</td>")
+                else:
+                    html.append("<td class='no-data'>—</td>")
+            else:  # financial
+                value = getattr(fin, field_name, None) if fin else None
+                src_id = fin.source_id if fin else None
+                # Check if this field is calculated (from provenance)
+                is_calc = False
+                if fin and src_id and provenance_data:
+                    pk = f"{src_id}:{field_name}"
+                    fp = provenance_data.get(pk)
+                    if fp and fp.get("calculated"):
+                        is_calc = True
+                calc_badge = ('<span style="font-size:9px;color:#888;vertical-align:super" '
+                              'title="Calculated from components"> calc</span>') if is_calc else ""
+                if value is not None:
+                    if field_name == "source_tier":
+                        html.append(f"<td style='text-align:center'>{int(value)}</td>")
+                    elif src_id:
+                        html.append(
+                            f"<td class='has-source' onclick=\"showSource({src_id},'{field_name}')\">"
+                            f"{fmt(value)}{calc_badge}</td>"
+                        )
+                    else:
+                        html.append(f"<td>{fmt(value)}{calc_badge}</td>")
                 else:
                     html.append("<td class='no-data'>—</td>")
 
@@ -1294,6 +1450,7 @@ def render_single_company():
     for year in all_years:
         em = em_by_year.get(year)
         fin = fin_by_year.get(year)
+        dc = debt_components_by_year.get(year, {})
         csv_rows.append({
             "Year": year,
             "S1": fmt(em.scope_1) if em else "—",
@@ -1301,13 +1458,15 @@ def render_single_company():
             "S2 mkt": fmt(em.scope_2_market) if em else "—",
             "S3": fmt(em.scope_3) if em else "—",
             "Revenue": fmt(getattr(fin, "revenue", None)) if fin else "—",
-            "Gross Debt": fmt(getattr(fin, "gross_debt", None)) if fin else "—",
+            "LT Debt": fmt(dc.get("lt_val")) if dc.get("lt_val") is not None else "—",
+            "ST Debt": fmt(dc.get("st_val")) if dc.get("st_val") is not None else "—",
+            "Gross Debt (calc)": fmt(getattr(fin, "gross_debt", None)) if fin else "—",
             "Lease Liab.": fmt(getattr(fin, "lease_liabilities", None)) if fin else "—",
             "NCI": fmt(getattr(fin, "non_controlling_interests", None)) if fin else "—",
             "Pref Shares": fmt(getattr(fin, "preference_shares", None)) if fin else "—",
             "Shares Out": fmt(getattr(fin, "shares_outstanding", None)) if fin else "—",
             "Equity": fmt(getattr(fin, "equity_value", None)) if fin else "—",
-            "EVIC": fmt(getattr(fin, "evic", None)) if fin else "—",
+            "EVIC (calc)": fmt(getattr(fin, "evic", None)) if fin else "—",
             "Tier": getattr(fin, "source_tier", None) if fin else "—",
             "Em. Basis": record_basis(em),
             "Fin. Basis": record_basis(fin),

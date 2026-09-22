@@ -162,29 +162,50 @@ _SHARES_TAGS = [
 ]
 
 
-def _fetch_first_match(cik: int, tag_list: list[tuple], fy: int) -> tuple[float | None, str | None]:
+def _fetch_first_match(cik: int, tag_list: list[tuple], fy: int) -> tuple[float | None, dict | None]:
     """Try each (taxonomy, tag) pair until one returns a value for the given FY."""
     for taxonomy, tag in tag_list:
         entries = _get_concept_values(cik, taxonomy, tag)
         val = _annual_value(entries, fy)
         if val is not None:
-            return val, f"{taxonomy}:{tag}"
+            return val, {
+                "concept": f"{taxonomy}:{tag}",
+                "value": val,
+                "unit": "iso4217:USD",
+                "period": f"{fy}-01-01/{fy + 1}-01-01",
+                "calculated": False,
+            }
     return None, None
 
 
-def _fetch_sum(cik: int, tag_list: list[tuple], fy: int) -> tuple[float | None, str | None]:
+def _fetch_sum(cik: int, tag_list: list[tuple], fy: int) -> tuple[float | None, dict | None]:
     """Sum values from multiple tags for the given FY."""
     total = 0
     found_any = False
-    matched = []
+    components = []
     for taxonomy, tag in tag_list:
         entries = _get_concept_values(cik, taxonomy, tag)
         val = _annual_value(entries, fy)
         if val is not None:
             total += val
             found_any = True
-            matched.append(f"{taxonomy}:{tag}")
-    return (total, " + ".join(matched)) if found_any else (None, None)
+            components.append({
+                "concept": f"{taxonomy}:{tag}",
+                "value": val,
+                "calculated": False,
+                "period": f"{fy}-01-01/{fy + 1}-01-01",
+            })
+    if not found_any:
+        return None, None
+    concept_str = " + ".join(c["concept"] for c in components)
+    return total, {
+        "concept": concept_str,
+        "value": total,
+        "unit": "iso4217:USD",
+        "period": f"{fy}-01-01/{fy + 1}-01-01",
+        "calculated": True,
+        "components": components,
+    }
 
 
 def extract_financials_from_edgar(
@@ -226,11 +247,24 @@ def extract_financials_from_edgar(
             log.info(f"    Tier 1 EDGAR: {fy} — no data")
             continue
 
-        def _edgar_url(tag_str):
-            if not tag_str or "+" in tag_str:
+        def _edgar_url(concept_str):
+            if not concept_str or "+" in concept_str:
                 return None
-            taxonomy, tag = tag_str.split(":", 1)
+            taxonomy, tag = concept_str.split(":", 1)
             return f"{_BASE}/companyconcept/CIK{padded_cik}/{taxonomy}/{tag}.json"
+
+        def _ref(prov):
+            return prov["concept"] if prov else None
+
+        # Build per-field provenance for the popup
+        provenance = {}
+        for field, prov in [("revenue", rev_tag), ("gross_debt", debt_tag),
+                            ("lease_liabilities", lease_tag),
+                            ("non_controlling_interests", nci_tag),
+                            ("preference_shares", pref_tag),
+                            ("shares_outstanding", shares_tag)]:
+            if prov:
+                provenance[field] = prov
 
         entry = {
             "reporting_year": fy,
@@ -238,12 +272,13 @@ def extract_financials_from_edgar(
             "currency": "USD",
             "unit_multiplier": 1,
             "viewer_url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={padded_cik}&type=10-K&dateb=&owner=include&count=10",
-            "gross_debt": {"value": gross_debt, "components": [], "ref": debt_tag, "confidence": "high", "url": _edgar_url(debt_tag)},
-            "lease_liabilities": {"value": lease_liab, "label": lease_tag, "ref": lease_tag, "confidence": "high", "url": _edgar_url(lease_tag)},
-            "non_controlling_interests": {"value": nci, "label": nci_tag, "ref": nci_tag, "confidence": "high", "url": _edgar_url(nci_tag)},
-            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": pref_tag, "url": _edgar_url(pref_tag)},
-            "shares_outstanding": {"value": shares, "share_class": "", "ref": shares_tag, "confidence": "high", "url": _edgar_url(shares_tag)},
-            "revenue": {"value": revenue, "label": rev_tag, "ref": rev_tag, "confidence": "high", "url": _edgar_url(rev_tag)},
+            "provenance": provenance,
+            "gross_debt": {"value": gross_debt, "components": [], "ref": _ref(debt_tag), "confidence": "high", "url": _edgar_url(_ref(debt_tag))},
+            "lease_liabilities": {"value": lease_liab, "label": _ref(lease_tag), "ref": _ref(lease_tag), "confidence": "high", "url": _edgar_url(_ref(lease_tag))},
+            "non_controlling_interests": {"value": nci, "label": _ref(nci_tag), "ref": _ref(nci_tag), "confidence": "high", "url": _edgar_url(_ref(nci_tag))},
+            "preference_shares": {"value": pref, "classification": "unknown", "listed": None, "ref": _ref(pref_tag), "url": _edgar_url(_ref(pref_tag))},
+            "shares_outstanding": {"value": shares, "share_class": "", "ref": _ref(shares_tag), "confidence": "high", "url": _edgar_url(_ref(shares_tag))},
+            "revenue": {"value": revenue, "label": _ref(rev_tag), "ref": _ref(rev_tag), "confidence": "high", "url": _edgar_url(_ref(rev_tag))},
             "is_financial_institution": False,
             "notes": [f"Tier 1: extracted from SEC EDGAR XBRL (CIK {cik})"],
         }
