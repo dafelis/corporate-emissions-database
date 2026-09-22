@@ -1384,34 +1384,34 @@ def render_single_company():
                 return f"<td style='text-align:center'>{fye}</td>"
             return "<td class='no-data' style='text-align:center'>—</td>"
 
-        def _period_to_year_end(period_str):
-            """Extract the end date from a period string and check if it's a calendar year-end."""
+        def _period_to_cy(period_str):
+            """Normalize a period to a (type, year) tuple for comparison.
+
+            Dec 31 YYYY and Jan 1 YYYY+1 both map to ("CY", YYYY).
+            Mar 31 YYYY maps to ("FY", YYYY). Anything else returns the raw end date.
+            """
             p = period_str.replace("T00:00:00", "")
-            # Formats: "2021-12-31", "2021-01-01/2021-12-31", "2021-01-01/2022-01-01"
             if "/" in p:
                 end = p.split("/")[-1]
             else:
                 end = p
-            return end
-
-        ends = set()
-        for period in field_periods.values():
-            ends.add(_period_to_year_end(period))
-
-        if len(ends) == 1:
-            end = ends.pop()
-            # Check if it's a calendar year-end
             if end.endswith("-12-31"):
-                y = end[:4]
-                return f"<td style='text-align:center'>CY {y}</td>"
+                return ("CY", end[:4])
             if end.endswith("-01-01"):
-                # Jan 1 of next year = Dec 31 of prior year
-                y = str(int(end[:4]) - 1)
-                return f"<td style='text-align:center'>CY {y}</td>"
+                return ("CY", str(int(end[:4]) - 1))
             if end.endswith("-03-31"):
-                y = end[:4]
-                return f"<td style='text-align:center'>FY {y}</td>"
-            return f"<td style='text-align:center'>{end}</td>"
+                return ("FY", end[:4])
+            return ("raw", end)
+
+        normalized = set()
+        for period in field_periods.values():
+            normalized.add(_period_to_cy(period))
+
+        if len(normalized) == 1:
+            kind, y = normalized.pop()
+            if kind in ("CY", "FY"):
+                return f"<td style='text-align:center'>{kind} {y}</td>"
+            return f"<td style='text-align:center'>{y}</td>"
 
         # Inconsistent — store data for modal popup
         fin_basis_details[yr] = field_periods
