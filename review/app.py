@@ -221,6 +221,19 @@ def _build_source_data(session_obj, source_ids, include_screenshots=False):
     return result
 
 
+def _stamp_extraction_dates(source_data, *record_lists):
+    """Add extraction_date from records onto matching source_data entries."""
+    for records in record_lists:
+        for r in records:
+            sid = str(r.source_id) if r.source_id else None
+            ext = getattr(r, "extraction_date", None)
+            if sid and ext and sid in source_data:
+                existing = source_data[sid].get("created", "")
+                stamp = ext.strftime("%Y-%m-%d %H:%M")
+                if not existing or stamp > existing:
+                    source_data[sid]["created"] = stamp
+
+
 # ── CSS for the source-popup modal ────────────────────────────────────
 
 _POPUP_STYLES = """
@@ -570,6 +583,7 @@ def render_data_table():
     # ── Build source data for popups ──────────────────────────────────
     source_ids = _collect_source_ids(emissions) | _collect_source_ids(financials)
     source_data = _build_source_data(session, source_ids, include_screenshots=False)
+    _stamp_extraction_dates(source_data, emissions, financials)
 
     # ── Build HTML table ───────────────────────────────────────────────
     html_parts = []
@@ -1275,6 +1289,7 @@ def render_single_company():
     # ── Build source data (with screenshots for single-company view) ──
     source_ids = _collect_source_ids(emissions) | _collect_source_ids(financials)
     source_data = _build_source_data(session, source_ids, include_screenshots=True)
+    _stamp_extraction_dates(source_data, emissions, financials)
     provenance_data = _build_provenance_data(financials)
 
     # ── Helpers ────────────────────────────────────────────────────────
