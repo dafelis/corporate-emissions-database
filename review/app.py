@@ -41,6 +41,18 @@ if not DATABASE_URL:
 
 session = get_session(DATABASE_URL)
 
+# Backfill NULL timestamps on existing records (one-time, idempotent)
+_backfilled = session.query(Source).filter(Source.fetched_at.is_(None)).update(
+    {"fetched_at": datetime.utcnow()})
+_backfilled += session.query(EmissionsRecord).filter(
+    EmissionsRecord.extraction_date.is_(None)).update(
+    {"extraction_date": datetime.utcnow()})
+_backfilled += session.query(FinancialRecord).filter(
+    FinancialRecord.extraction_date.is_(None)).update(
+    {"extraction_date": datetime.utcnow()})
+if _backfilled:
+    session.commit()
+
 # ════════════════════════════════════════════════════════════════════════
 # Sidebar — shared across views
 # ════════════════════════════════════════════════════════════════════════
@@ -351,6 +363,7 @@ function showSource(sid,field,yr,extDate){
     h+='</div>';
     if(s.url) h+='<div class="src-link"><a href="'+esc(s.url)+'" target="_blank" rel="noopener">Open source document ↗</a></div>';
     // Show provenance details for Tier 1/2 financial fields
+    var showedExtracted=false;
     if(field){
         var pk=String(sid)+':'+field+(yr?':'+yr:'');
         var pv=PROVENANCE[pk];
@@ -401,12 +414,11 @@ function showSource(sid,field,yr,extDate){
                 }
                 h+='</table>';
             }
-            if(pv.extracted) h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+esc(pv.extracted)+' UTC</div>';
+            if(pv.extracted){h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+esc(pv.extracted)+' UTC</div>';showedExtracted=true;}
         }
     }
     if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'" onclick="expandImg(this.src)" title="Click to expand"></div>';
-    var ts=s.created||extDate||'';
-    if(ts) h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+esc(ts)+' UTC</div>';
+    if(!showedExtracted){var ts=s.created||extDate||'';h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+(ts?esc(ts)+' UTC':'Unknown')+'</div>';}
     document.getElementById('modal-title').textContent='Source';
     document.getElementById('modal-body').innerHTML=h;
     document.getElementById('modal-backdrop').style.display='block';
