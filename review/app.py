@@ -343,7 +343,7 @@ function fmtPeriod(p){
     var parts=p.replace(/T00:00:00/g,'').split('/');
     return parts.join(' to ');
 }
-function showSource(sid,field,yr){
+function showSource(sid,field,yr,extDate){
     var s=SOURCES[String(sid)]; if(!s) return;
     var h='<div class="src-title">📄 '+esc(s.title)+'</div>';
     h+='<div class="src-meta">Type: '+esc(s.type);
@@ -405,7 +405,8 @@ function showSource(sid,field,yr){
         }
     }
     if(s.screenshot) h+='<div class="src-screenshot"><img src="'+s.screenshot+'" onclick="expandImg(this.src)" title="Click to expand"></div>';
-    if(s.created) h+='<div style="margin-top:10px;font-size:11px;color:#999">Source fetched: '+esc(s.created)+' UTC</div>';
+    var ts=s.created||extDate||'';
+    if(ts) h+='<div style="margin-top:10px;font-size:11px;color:#999">Extracted: '+esc(ts)+' UTC</div>';
     document.getElementById('modal-title').textContent='Source';
     document.getElementById('modal-body').innerHTML=h;
     document.getElementById('modal-backdrop').style.display='block';
@@ -706,9 +707,12 @@ def render_data_table():
                     css_class = "approved" if status == "approved" else "not-approved"
                     display_val = f"{value:,.2f}" if source_type == "market_component" else fmt_num(value)
                     if src_id:
+                        ext_arg = ""
+                        if source_type == "emissions" and em and getattr(em, "extraction_date", None):
+                            ext_arg = em.extraction_date.strftime("%Y-%m-%d %H:%M")
                         html_parts.append(
                             f"<td class='{css_class} has-source' "
-                            f"onclick=\"showSource({src_id},'{field_name}',{year})\">{display_val}</td>"
+                            f"onclick=\"showSource({src_id},'{field_name}',{year},'{ext_arg}')\">{display_val}</td>"
                         )
                     else:
                         html_parts.append(f"<td class='{css_class}'>{display_val}</td>")
@@ -1536,8 +1540,11 @@ def render_single_company():
                 src_id = em.source_id if em else None
                 if value is not None:
                     if src_id:
+                        ext_dt = ""
+                        if em and getattr(em, "extraction_date", None):
+                            ext_dt = em.extraction_date.strftime("%Y-%m-%d %H:%M")
                         html.append(
-                            f"<td class='has-source' onclick='showSource({src_id})'>"
+                            f"<td class='has-source' onclick=\"showSource({src_id},null,null,'{ext_dt}')\">"
                             f"{fmt(value)}</td>"
                         )
                     else:

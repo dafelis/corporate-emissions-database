@@ -647,7 +647,7 @@ def _extract_emissions_round(
             company_id=company.id, url=url, title=title,
             document_type=source_type, s3_pdf_key=s3_pdf_key,
             screenshot_path=screenshot_path, html_snippet=html_snippet,
-            page_number=page_number,
+            page_number=page_number, fetched_at=datetime.utcnow(),
         )
         session.add(source)
         session.flush()
@@ -703,6 +703,7 @@ def _extract_emissions_round(
                         confidence_score=best_confidence,
                         is_restated=True,
                         review_status="pending",
+                        extraction_date=datetime.utcnow(),
                     )
                     session.add(restated)
                     saved += 1
@@ -758,6 +759,7 @@ def _extract_emissions_round(
                 source_id=source.id,
                 confidence_score=best_confidence,
                 review_status="pending",
+                extraction_date=datetime.utcnow(),
             )
             session.add(record)
             covered_years.add(year)
@@ -874,7 +876,7 @@ def _extract_financials_from_document(
         company_id=company.id, url=url, title=title,
         document_type=source_type, s3_pdf_key=s3_pdf_key,
         screenshot_path=screenshot_path, html_snippet=html_snippet,
-        page_number=page_number,
+        page_number=page_number, fetched_at=datetime.utcnow(),
     )
     session.add(fin_source)
     session.flush()
@@ -1084,6 +1086,7 @@ def _extract_financials_from_document(
             validation_flags=json.dumps(val_flags) if val_flags else None,
             extraction_notes=json.dumps(notes) if notes else None,
             review_status="flagged" if val_flags else "pending",
+            extraction_date=datetime.utcnow(),
         )
         session.add(fin_record)
         covered_years.add(year)
@@ -1135,6 +1138,7 @@ def _save_api_financial_entries(
         url=source_url,
         title=source_title,
         document_type="api",
+        fetched_at=datetime.utcnow(),
     )
     session.add(batch_source)
     session.flush()
@@ -1153,6 +1157,7 @@ def _save_api_financial_entries(
                 url=viewer_url,
                 title=f"{source_title} — {year}",
                 document_type="api",
+                fetched_at=datetime.utcnow(),
             )
             session.add(api_source)
             session.flush()
@@ -1313,6 +1318,7 @@ def _save_api_financial_entries(
                 "lei": getattr(company, "lei", None),
             }),
             review_status="flagged" if val_flags else "pending",
+            extraction_date=datetime.utcnow(),
         )
         session.add(fin_record)
         covered_years.add(year)
@@ -1763,6 +1769,7 @@ def process_company(
                     url=_google_finance_url(company.ticker),
                     title=f"Market data via yfinance ({company.ticker})",
                     document_type="api",
+                    fetched_at=datetime.utcnow(),
                 )
                 session.add(yf_source)
                 session.flush()
