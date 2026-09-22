@@ -208,7 +208,7 @@ def _build_source_data(session_obj, source_ids, include_screenshots=False):
             "url": s.url or "",
             "type": s.document_type or "Unknown",
             "page": (s.page_number + 1) if s.page_number is not None else None,
-            "created": s.created_at.strftime("%Y-%m-%d %H:%M") if s.created_at else "",
+            "created": s.fetched_at.strftime("%Y-%m-%d %H:%M") if s.fetched_at else "",
         }
         if include_screenshots and s.screenshot_path and os.path.exists(s.screenshot_path):
             try:
