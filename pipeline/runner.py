@@ -643,6 +643,8 @@ def _extract_emissions_round(
                 os.unlink(pdf_path)
             except OSError:
                 pass
+        except BudgetExceeded:
+            raise
         except Exception as e:
             log.warning(f"    PDF extraction failed: {e}")
 
@@ -680,6 +682,8 @@ def _extract_emissions_round(
                                 seen_years.add(year)
                                 if year == target_year:
                                     target_year_table_idx = candidate_tbl["index"]
+                except BudgetExceeded:
+                    raise
                 except Exception as e:
                     log.warning(f"    Extraction failed for table "
                                 f"{candidate_tbl['index']}: {e}")
@@ -926,6 +930,8 @@ def _extract_financials_from_document(
                 log.info(f"    Table {candidate_tbl['index']}: "
                          f"{new_this_table} new year(s), "
                          f"total so far {sorted(entries_by_year.keys())}")
+        except BudgetExceeded:
+            raise
         except Exception as e:
             log.warning(f"    Financial extraction failed for table {candidate_tbl['index']}: {e}")
 
@@ -1718,6 +1724,8 @@ def process_company(
                         break
                 else:
                     consecutive_empty = 0
+            except BudgetExceeded:
+                raise
             except Exception as e:
                 log.warning(f"    Emissions search failed: {e}")
                 events.append({"type": "error", "message": f"Emissions {walk_year}: {e}"})
@@ -1786,6 +1794,8 @@ def process_company(
                 )
                 total_fin_saved += saved
                 fin_missing = _get_financial_needs(session, company.id, target)
+            except BudgetExceeded:
+                raise
             except Exception as e:
                 log.warning(f"    Five-year summary search failed: {e}")
                 events.append({"type": "error", "message": f"Financial summary: {e}"})
@@ -1818,6 +1828,8 @@ def process_company(
                             break
                     else:
                         consecutive_empty = 0
+                except BudgetExceeded:
+                    raise
                 except Exception as e:
                     log.warning(f"    Financial search failed: {e}")
                     events.append({"type": "error", "message": f"Financial {walk_year}: {e}"})
@@ -1925,6 +1937,8 @@ def process_company(
                              f"{currency} (price={price:.2f} × shares={shares:,} "
                              f"[{shares_source}]){evic_str}")
                 session.commit()
+            except BudgetExceeded:
+                raise
             except Exception as e:
                 log.warning(f"  Market data fetch failed: {e}")
                 session.rollback()
@@ -1958,6 +1972,8 @@ def process_company(
                 session.commit()
                 log.info(f"  Classified: SIC={company.sic_code}, "
                          f"NAICS={company.naics_code}, NACE={company.nace_code}")
+        except BudgetExceeded:
+            raise
         except Exception as e:
             log.warning(f"  Industry classification failed: {e}")
 
