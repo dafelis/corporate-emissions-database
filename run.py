@@ -457,8 +457,8 @@ def main():
                                 help="Global budget cap in USD (default: $20)")
     extract_parser.add_argument("--company-budget", type=float, default=None,
                                 help="Per-company budget cap in USD (default: $5)")
-    extract_parser.add_argument("--concurrent", type=int, default=1,
-                                help="Max companies to process concurrently (default: 1)")
+    extract_parser.add_argument("--concurrent", type=int, default=4,
+                                help="Max companies to process concurrently (default: 4)")
 
     # check
     subparsers.add_parser("check", help="Run sanity checks")
