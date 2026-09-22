@@ -1288,10 +1288,10 @@ def render_single_company():
 
     debt_components_by_year = {}
     for year_key, fin_rec in fin_by_year.items():
-        lt, lt_c, st, st_c = _get_debt_components(fin_rec)
+        lt, lt_c, sht, sht_c = _get_debt_components(fin_rec)
         debt_components_by_year[year_key] = {
             "lt_val": lt, "lt_concept": lt_c,
-            "st_val": st, "st_concept": st_c,
+            "st_val": sht, "st_concept": sht_c,
         }
 
     # ── Build HTML table ──────────────────────────────────────────────
