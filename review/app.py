@@ -143,6 +143,7 @@ def _build_provenance_data(financial_records):
                 "ticker": prov.get("ticker", ""),
                 "share_price": prov.get("share_price"),
                 "shares": prov.get("shares"),
+                "shares_source": prov.get("shares_source", ""),
             }
             prov_data[key] = entry
 
@@ -318,7 +319,30 @@ function showSource(sid,field,yr){
         var pk=String(sid)+':'+field+(yr?':'+yr:'');
         var pv=PROVENANCE[pk];
         if(pv){
-            if(pv.calculated && pv.components && pv.components.length>0){
+            if(field==='equity_value'){
+                // Equity: show calculation (price × shares) plus metadata
+                var cur=esc((pv.unit||'').replace('iso4217:',''));
+                h+='<div style="margin-top:14px;padding:14px;background:#f0f7ff;border-radius:6px;border:1px solid #d0e3f7">';
+                h+='<div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:8px;letter-spacing:0.5px">Calculated value</div>';
+                var priceFmt=pv.share_price!=null?pv.share_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'?';
+                var sharesFmt=pv.shares!=null?pv.shares.toLocaleString():'?';
+                h+='<div style="font-size:14px;font-weight:600;color:#111;margin-bottom:10px">Market cap = Share price ('+priceFmt+') × Shares outstanding ('+sharesFmt+')</div>';
+                h+='<div style="font-size:12px;color:#111;margin-bottom:4px">= '+fmtNum(pv.value)+'</div>';
+                if(cur) h+='<div style="font-size:12px;color:#111;margin-bottom:4px">Currency: '+cur+'</div>';
+                h+='<div style="font-size:12px;color:#111;margin-bottom:2px">Price date: '+fmtPeriod(pv.period)+'</div>';
+                if(pv.shares_source) h+='<div style="font-size:12px;color:#111">Shares source: '+esc(pv.shares_source)+'</div>';
+                h+='</div>';
+                h+='<table style="margin-top:10px;font-size:13px;border-collapse:collapse;width:100%">';
+                var eqRows=[
+                    ['Identifier',pv.ticker?'Yahoo Finance: '+esc(pv.ticker):'—'],
+                    ['Company',pv.entity_name||'—'],
+                ];
+                for(var ei=0;ei<eqRows.length;ei++){
+                    h+='<tr><td style="padding:4px 10px 4px 0;color:#888;white-space:nowrap;vertical-align:top">'+eqRows[ei][0]+'</td>';
+                    h+='<td style="padding:4px 0;font-weight:500">'+eqRows[ei][1]+'</td></tr>';
+                }
+                h+='</table>';
+            } else if(pv.calculated && pv.components && pv.components.length>0){
                 // Show calculation formula with full detail
                 var formula=field.replace(/_/g,' ');
                 formula=formula.charAt(0).toUpperCase()+formula.slice(1);
@@ -345,23 +369,6 @@ function showSource(sid,field,yr){
                     if(cp2) h+='<div style="font-size:12px;color:#111">Period — '+esc(cn2)+': '+fmtPeriod(cp2)+'</div>';
                 }
                 h+='</div>';
-            } else if(field==='equity_value'){
-                // Equity-specific provenance
-                h+='<table style="margin-top:14px;font-size:13px;border-collapse:collapse;width:100%">';
-                var eqRows=[
-                    ['Identifier',pv.ticker?'Yahoo Finance: '+esc(pv.ticker):'—'],
-                    ['Company',pv.entity_name||'—'],
-                    ['Date',fmtPeriod(pv.period)],
-                    ['Currency',esc((pv.unit||'').replace('iso4217:',''))],
-                    ['Market cap',fmtNum(pv.value)+' <span style="color:#888">(raw: '+(pv.value!=null?pv.value.toLocaleString():'—')+')</span>'],
-                ];
-                if(pv.share_price!=null) eqRows.push(['Share price',pv.share_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})]);
-                if(pv.shares!=null) eqRows.push(['Shares outstanding',pv.shares.toLocaleString()]);
-                for(var ei=0;ei<eqRows.length;ei++){
-                    h+='<tr><td style="padding:4px 10px 4px 0;color:#888;white-space:nowrap;vertical-align:top">'+eqRows[ei][0]+'</td>';
-                    h+='<td style="padding:4px 0;font-weight:500">'+eqRows[ei][1]+'</td></tr>';
-                }
-                h+='</table>';
             } else {
                 // Standard provenance table for directly extracted values
                 h+='<table style="margin-top:14px;font-size:13px;border-collapse:collapse;width:100%">';
@@ -530,16 +537,16 @@ def render_data_table():
         return
 
     # ── Year basis helper ─────────────────────────────────────────────
+    _MONTH_NAMES_DT = {1: "January", 2: "February", 3: "March", 4: "April",
+                        5: "May", 6: "June", 7: "July", 8: "August",
+                        9: "September", 10: "October", 11: "November", 12: "December"}
+
     def record_basis(rec):
-        """Return e.g. 'CY 2025', 'FY 2026', 'Other' from a record's period_end."""
+        """Return e.g. 'End December 2025' from a record's period_end."""
         if not rec or not rec.period_end:
             return "—"
-        m, d, y = rec.period_end.month, rec.period_end.day, rec.period_end.year
-        if m == 12 and d == 31:
-            return f"CY {y}"
-        if m == 3 and d == 31:
-            return f"FY {y}"
-        return "Other"
+        m, y = rec.period_end.month, rec.period_end.year
+        return f"End {_MONTH_NAMES_DT[m]} {y}"
 
     # ── Format helpers ─────────────────────────────────────────────────
     def fmt_num(value):
@@ -1262,15 +1269,15 @@ def render_single_company():
     provenance_data = _build_provenance_data(financials)
 
     # ── Helpers ────────────────────────────────────────────────────────
+    _MONTH_NAMES_SC = {1: "January", 2: "February", 3: "March", 4: "April",
+                        5: "May", 6: "June", 7: "July", 8: "August",
+                        9: "September", 10: "October", 11: "November", 12: "December"}
+
     def record_basis(rec):
         if not rec or not rec.period_end:
             return "—"
-        m, d, y = rec.period_end.month, rec.period_end.day, rec.period_end.year
-        if m == 12 and d == 31:
-            return f"CY {y}"
-        if m == 3 and d == 31:
-            return f"FY {y}"
-        return "Other"
+        m, y = rec.period_end.month, rec.period_end.year
+        return f"End {_MONTH_NAMES_SC[m]} {y}"
 
     def fmt(value):
         if value is None:
@@ -1352,14 +1359,13 @@ def render_single_company():
         sid = str(fin_rec.source_id) if fin_rec.source_id else None
         mkt_sid = str(fin_rec.market_data_source_id) if getattr(fin_rec, "market_data_source_id", None) else None
 
-        # Collect periods from provenance for each financial field
+        # Collect periods from provenance for each EVIC-relevant field
         fin_fields_to_check = [
             ("Revenue", "revenue", sid),
             ("Gross Debt", "gross_debt", sid),
             ("Lease Liab.", "lease_liabilities", sid),
             ("NCI", "non_controlling_interests", sid),
             ("Pref Shares", "preference_shares", sid),
-            ("Shares Out", "shares_outstanding", sid),
             ("Equity", "equity_value", mkt_sid),
         ]
 
@@ -1373,45 +1379,52 @@ def render_single_company():
                 field_periods[flabel] = pv["period"]
 
         if not field_periods:
-            # Fall back to fiscal_year_end
             fye = getattr(fin_rec, "fiscal_year_end", None)
             if fye:
-                m, d, y = fye.month, fye.day, fye.year
-                if m == 12 and d == 31:
-                    return f"<td style='text-align:center'>CY {y}</td>"
-                if m == 3 and d == 31:
-                    return f"<td style='text-align:center'>FY {y}</td>"
-                return f"<td style='text-align:center'>{fye}</td>"
+                return f"<td style='text-align:center'>{_month_label(fye.month, fye.year)}</td>"
             return "<td class='no-data' style='text-align:center'>—</td>"
 
-        def _period_to_cy(period_str):
-            """Normalize a period to a (type, year) tuple for comparison.
+        _MONTH_NAMES = {1: "January", 2: "February", 3: "March", 4: "April",
+                        5: "May", 6: "June", 7: "July", 8: "August",
+                        9: "September", 10: "October", 11: "November", 12: "December"}
 
-            Dec 31 YYYY and Jan 1 YYYY+1 both map to ("CY", YYYY).
-            Mar 31 YYYY maps to ("FY", YYYY). Anything else returns the raw end date.
+        def _month_label(month, year):
+            return f"End {_MONTH_NAMES[month]} {year}"
+
+        def _period_to_month_year(period_str):
+            """Normalize a period end date to (month, year).
+
+            Treats Dec 29-31 and Jan 1 of next year as End December.
+            For other months, uses the last day's month.
             """
             p = period_str.replace("T00:00:00", "")
             if "/" in p:
                 end = p.split("/")[-1]
             else:
                 end = p
-            if end.endswith("-12-31"):
-                return ("CY", end[:4])
-            if end.endswith("-01-01"):
-                return ("CY", str(int(end[:4]) - 1))
-            if end.endswith("-03-31"):
-                return ("FY", end[:4])
-            return ("raw", end)
+            try:
+                parts = end.split("-")
+                y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+            except (ValueError, IndexError):
+                return None
+            # Jan 1 = End December of prior year
+            if m == 1 and d == 1:
+                return (12, y - 1)
+            # Dec 29-31 all count as End December
+            if m == 12 and d >= 29:
+                return (12, y)
+            # Last few days of any month = that month's end
+            return (m, y)
 
         normalized = set()
         for period in field_periods.values():
-            normalized.add(_period_to_cy(period))
+            result = _period_to_month_year(period)
+            if result:
+                normalized.add(result)
 
         if len(normalized) == 1:
-            kind, y = normalized.pop()
-            if kind in ("CY", "FY"):
-                return f"<td style='text-align:center'>{kind} {y}</td>"
-            return f"<td style='text-align:center'>{y}</td>"
+            m, y = normalized.pop()
+            return f"<td style='text-align:center'>{_month_label(m, y)}</td>"
 
         # Inconsistent — store data for modal popup
         fin_basis_details[yr] = field_periods

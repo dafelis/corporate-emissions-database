@@ -35,7 +35,7 @@ from pipeline.financial_validator import validate_financial_entry, compute_evic
 from pipeline.tier1_xbrl import extract_financials_from_xbrl
 from pipeline.tier1_edgar import extract_financials_from_edgar
 from pipeline.tier2_yfinance import extract_financials_from_yfinance
-from pipeline.market_data import get_equity_value_at_date, get_industry_info
+from pipeline.market_data import get_share_price_at_date, get_fallback_shares, get_industry_info
 from pipeline.industry_classifier import classify_company
 from pipeline.storage import upload_file
 from pipeline.config import (
@@ -1769,44 +1769,69 @@ def process_company(
 
                 for fr in fin_records:
                     target_date = fr.fiscal_year_end or date_type(fr.reporting_year, 12, 31)
-                    equity_data = get_equity_value_at_date(company.ticker, target_date)
-                    if equity_data:
-                        fr.equity_value = equity_data["market_cap"]
-                        if fr.shares_outstanding is None:
-                            fr.shares_outstanding = equity_data["shares_outstanding"]
-                        fr.share_price_at_fy_end = equity_data["share_price"]
-                        fr.equity_currency = equity_data["currency"]
-                        fr.market_data_source_id = yf_source.id
-                        # Store equity provenance
-                        try:
-                            notes_data = json.loads(fr.extraction_notes) if fr.extraction_notes else {}
-                        except (json.JSONDecodeError, TypeError):
-                            notes_data = {}
-                        prov = notes_data.get("provenance", {})
-                        actual_date = equity_data.get("price_date", target_date)
-                        prov["equity_value"] = {
-                            "concept": "market_cap",
-                            "value": equity_data["market_cap"],
-                            "unit": f"iso4217:{equity_data['currency']}",
-                            "period": str(actual_date),
-                            "calculated": False,
-                            "ticker": company.ticker,
-                            "share_price": equity_data["share_price"],
-                            "shares": equity_data["shares_outstanding"],
-                        }
-                        notes_data["provenance"] = prov
-                        notes_data["entity_name"] = notes_data.get("entity_name", company.name)
-                        fr.extraction_notes = json.dumps(notes_data)
-                        # Legacy enterprise_value
-                        if fr.outstanding_debt is not None and fr.cash_and_equivalents is not None:
-                            fr.enterprise_value = (
-                                fr.equity_value + fr.outstanding_debt - fr.cash_and_equivalents
-                            )
-                        # PCAF EVIC
-                        evic = compute_evic(fr)
-                        evic_str = f", EVIC={evic:,.0f}" if evic else ""
-                        log.info(f"    {fr.reporting_year}: equity={fr.equity_value:,.0f} "
-                                 f"{fr.equity_currency}{evic_str}")
+                    price_data = get_share_price_at_date(company.ticker, target_date)
+                    if not price_data:
+                        continue
+                    price = price_data["share_price"]
+                    price_date = price_data["price_date"]
+                    currency = price_data["currency"]
+
+                    # Shares: prefer filing data, then yfinance fallbacks
+                    shares = fr.shares_outstanding
+                    shares_source = "filing"
+                    if shares is None:
+                        shares = get_fallback_shares(company.ticker, target_date)
+                        shares_source = "yfinance"
+                    if shares is None:
+                        log.warning(f"    {fr.reporting_year}: no shares data, skipping equity")
+                        continue
+
+                    market_cap = price * shares
+                    fr.equity_value = market_cap
+                    fr.share_price_at_fy_end = price
+                    fr.equity_currency = currency
+                    fr.market_data_source_id = yf_source.id
+                    if shares_source == "yfinance":
+                        fr.shares_outstanding = shares
+
+                    # Store equity provenance
+                    try:
+                        notes_data = json.loads(fr.extraction_notes) if fr.extraction_notes else {}
+                    except (json.JSONDecodeError, TypeError):
+                        notes_data = {}
+                    prov = notes_data.get("provenance", {})
+                    prov["equity_value"] = {
+                        "concept": "market_cap",
+                        "value": market_cap,
+                        "unit": f"iso4217:{currency}",
+                        "period": str(price_date),
+                        "calculated": True,
+                        "ticker": company.ticker,
+                        "share_price": price,
+                        "shares": shares,
+                        "shares_source": shares_source,
+                        "components": [
+                            {"concept": "Share price", "value": price,
+                             "period": str(price_date), "calculated": False},
+                            {"concept": "Shares outstanding", "value": shares,
+                             "period": prov.get("shares_outstanding", {}).get("period", ""),
+                             "calculated": False, "source": shares_source},
+                        ],
+                    }
+                    notes_data["provenance"] = prov
+                    notes_data["entity_name"] = notes_data.get("entity_name", company.name)
+                    fr.extraction_notes = json.dumps(notes_data)
+                    # Legacy enterprise_value
+                    if fr.outstanding_debt is not None and fr.cash_and_equivalents is not None:
+                        fr.enterprise_value = (
+                            fr.equity_value + fr.outstanding_debt - fr.cash_and_equivalents
+                        )
+                    # PCAF EVIC
+                    evic = compute_evic(fr)
+                    evic_str = f", EVIC={evic:,.0f}" if evic else ""
+                    log.info(f"    {fr.reporting_year}: equity={market_cap:,.0f} "
+                             f"{currency} (price={price:.2f} × shares={shares:,} "
+                             f"[{shares_source}]){evic_str}")
                 session.commit()
             except Exception as e:
                 log.warning(f"  Market data fetch failed: {e}")
