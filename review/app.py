@@ -171,6 +171,22 @@ def _build_provenance_data(financial_records):
                         "calculated": False,
                         "components": [],
                     }
+
+            # For equity_value, create share price entry from provenance
+            if field == "equity_value" and prov.get("share_price") is not None:
+                sp_key = f"{use_id}:_share_price:{fin.reporting_year}"
+                prov_data[sp_key] = {
+                    "lei": lei,
+                    "entity_name": entity_name,
+                    "concept": "yfinance:ClosePrice",
+                    "value": prov.get("share_price"),
+                    "unit": prov.get("unit", ""),
+                    "period": prov.get("period", ""),
+                    "year": fin.reporting_year,
+                    "calculated": False,
+                    "components": [],
+                    "ticker": prov.get("ticker", ""),
+                }
     return prov_data
 
 
@@ -319,32 +335,9 @@ function showSource(sid,field,yr){
         var pk=String(sid)+':'+field+(yr?':'+yr:'');
         var pv=PROVENANCE[pk];
         if(pv){
-            if(field==='equity_value'){
-                // Equity: show calculation (price × shares) plus metadata
-                var cur=esc((pv.unit||'').replace('iso4217:',''));
-                h+='<div style="margin-top:14px;padding:14px;background:#f0f7ff;border-radius:6px;border:1px solid #d0e3f7">';
-                h+='<div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:8px;letter-spacing:0.5px">Calculated value</div>';
-                var priceFmt=pv.share_price!=null?pv.share_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'?';
-                var sharesFmt=pv.shares!=null?pv.shares.toLocaleString():'?';
-                h+='<div style="font-size:14px;font-weight:600;color:#111;margin-bottom:10px">Market cap = Share price ('+priceFmt+') × Shares outstanding ('+sharesFmt+')</div>';
-                h+='<div style="font-size:12px;color:#111;margin-bottom:4px">= '+fmtNum(pv.value)+'</div>';
-                if(cur) h+='<div style="font-size:12px;color:#111;margin-bottom:4px">Currency: '+cur+'</div>';
-                h+='<div style="font-size:12px;color:#111;margin-bottom:2px">Price date: '+fmtPeriod(pv.period)+'</div>';
-                if(pv.shares_source) h+='<div style="font-size:12px;color:#111">Shares source: '+esc(pv.shares_source)+'</div>';
-                h+='</div>';
-                h+='<table style="margin-top:10px;font-size:13px;border-collapse:collapse;width:100%">';
-                var eqRows=[
-                    ['Identifier',pv.ticker?'Yahoo Finance: '+esc(pv.ticker):'—'],
-                    ['Company',pv.entity_name||'—'],
-                ];
-                for(var ei=0;ei<eqRows.length;ei++){
-                    h+='<tr><td style="padding:4px 10px 4px 0;color:#888;white-space:nowrap;vertical-align:top">'+eqRows[ei][0]+'</td>';
-                    h+='<td style="padding:4px 0;font-weight:500">'+eqRows[ei][1]+'</td></tr>';
-                }
-                h+='</table>';
-            } else if(pv.calculated && pv.components && pv.components.length>0){
+            if(pv.calculated && pv.components && pv.components.length>0){
                 // Show calculation formula with full detail
-                var formula=field.replace(/_/g,' ');
+                var formula=field==='equity_value'?'Market cap':field.replace(/_/g,' ');
                 formula=formula.charAt(0).toUpperCase()+formula.slice(1);
                 h+='<div style="margin-top:14px;padding:14px;background:#f0f7ff;border-radius:6px;border:1px solid #d0e3f7">';
                 h+='<div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:8px;letter-spacing:0.5px">Calculated value</div>';
@@ -356,7 +349,8 @@ function showSource(sid,field,yr){
                     cname=cname.replace(/^ifrs-full:/,'').replace(/^us-gaap:/,'').replace(/^yfinance:/,'');
                     fparts.push(cname+' ('+fmtNum(comp.value)+')');
                 }
-                h+='<div style="font-size:14px;font-weight:600;color:#111;margin-bottom:10px">'+esc(formula)+' = '+fparts.join(' + ')+'</div>';
+                var joiner=(field==='equity_value')?' × ':' + ';
+                h+='<div style="font-size:14px;font-weight:600;color:#111;margin-bottom:10px">'+esc(formula)+' = '+fparts.join(joiner)+'</div>';
                 // Unit
                 var calcUnit=(pv.unit||'').replace('iso4217:','');
                 if(calcUnit) h+='<div style="font-size:12px;color:#111;margin-bottom:4px">Units: '+esc(calcUnit)+'</div>';
@@ -522,7 +516,9 @@ def render_data_table():
     fin_fields = [
         ("Revenue", "revenue", "financial"),
         ("Gross Debt", "gross_debt", "financial"),
-        ("Equity", "equity_value", "market"),
+        ("Share Price", "_share_price", "market_component"),
+        ("Shares Out", "shares_outstanding", "financial"),
+        ("Mkt Cap (calc)", "equity_value", "market"),
         ("EVIC (calc)", "evic", "market"),
     ]
 
@@ -671,8 +667,11 @@ def render_data_table():
                     value = getattr(em, field_name, None) if em else None
                     status = em.review_status if em else None
                     src_id = em.source_id if em else None
-                elif source_type == "market":
-                    value = getattr(fin, field_name, None) if fin else None
+                elif source_type in ("market", "market_component"):
+                    if source_type == "market_component":
+                        value = getattr(fin, "share_price_at_fy_end", None) if fin else None
+                    else:
+                        value = getattr(fin, field_name, None) if fin else None
                     status = fin.review_status if fin else None
                     src_id = getattr(fin, "market_data_source_id", None) if fin else None
                 else:
@@ -682,13 +681,14 @@ def render_data_table():
 
                 if value is not None:
                     css_class = "approved" if status == "approved" else "not-approved"
+                    display_val = f"{value:,.2f}" if source_type == "market_component" else fmt_num(value)
                     if src_id:
                         html_parts.append(
                             f"<td class='{css_class} has-source' "
-                            f"onclick=\"showSource({src_id},'{field_name}',{year})\">{fmt_num(value)}</td>"
+                            f"onclick=\"showSource({src_id},'{field_name}',{year})\">{display_val}</td>"
                         )
                     else:
-                        html_parts.append(f"<td class='{css_class}'>{fmt_num(value)}</td>")
+                        html_parts.append(f"<td class='{css_class}'>{display_val}</td>")
                 else:
                     html_parts.append("<td class='no-data'>—</td>")
 
@@ -1305,8 +1305,9 @@ def render_single_company():
         ("Lease Liab.", "lease_liabilities", "financial"),
         ("NCI", "non_controlling_interests", "financial"),
         ("Pref Shares", "preference_shares", "financial"),
+        ("Share Price", "_share_price", "market_component"),
         ("Shares Out", "shares_outstanding", "financial"),
-        ("Equity", "equity_value", "market"),
+        ("Mkt Cap (calc)", "equity_value", "market"),
         ("EVIC (calc)", "evic", "market"),
         ("Tier", "source_tier", "financial"),
         ("Em. Basis", "_em_basis", "basis"),
@@ -1536,12 +1537,25 @@ def render_single_company():
                     html.append(f"<td>{fmt(value)}</td>")
                 else:
                     html.append("<td class='no-data'>—</td>")
+            elif source_type == "market_component":
+                # Share price from equity_value provenance
+                mkt_src_id = getattr(fin, "market_data_source_id", None) if fin else None
+                value = getattr(fin, "share_price_at_fy_end", None) if fin else None
+                if value is not None and mkt_src_id:
+                    html.append(
+                        f"<td class='has-source' onclick=\"showSource({mkt_src_id},'{field_name}',{year})\">"
+                        f"{value:,.2f}</td>"
+                    )
+                elif value is not None:
+                    html.append(f"<td>{value:,.2f}</td>")
+                else:
+                    html.append("<td class='no-data'>—</td>")
             elif source_type == "market":
-                # Equity and EVIC use market_data_source_id
+                # Mkt Cap and EVIC use market_data_source_id
                 value = getattr(fin, field_name, None) if fin else None
                 mkt_src_id = getattr(fin, "market_data_source_id", None) if fin else None
                 mkt_calc = ('<span style="font-size:9px;color:#888;vertical-align:super" '
-                            'title="Calculated from components"> calc</span>') if field_name == "evic" else ""
+                            'title="Calculated from components"> calc</span>') if field_name in ("evic", "equity_value") else ""
                 if value is not None:
                     if mkt_src_id:
                         html.append(
@@ -1607,8 +1621,9 @@ def render_single_company():
             "Lease Liab.": fmt(getattr(fin, "lease_liabilities", None)) if fin else "—",
             "NCI": fmt(getattr(fin, "non_controlling_interests", None)) if fin else "—",
             "Pref Shares": fmt(getattr(fin, "preference_shares", None)) if fin else "—",
+            "Share Price": f"{fin.share_price_at_fy_end:,.2f}" if fin and getattr(fin, "share_price_at_fy_end", None) else "—",
             "Shares Out": fmt(getattr(fin, "shares_outstanding", None)) if fin else "—",
-            "Equity": fmt(getattr(fin, "equity_value", None)) if fin else "—",
+            "Mkt Cap (calc)": fmt(getattr(fin, "equity_value", None)) if fin else "—",
             "EVIC (calc)": fmt(getattr(fin, "evic", None)) if fin else "—",
             "Tier": getattr(fin, "source_tier", None) if fin else "—",
             "Em. Basis": record_basis(em),
