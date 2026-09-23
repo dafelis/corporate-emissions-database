@@ -13,7 +13,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, date as date_type
+from datetime import datetime, date as date_type, timedelta
 
 import anthropic
 
@@ -408,6 +408,55 @@ def _source_quality(title):
     return 50
 
 
+def _shift_years(d, years_back):
+    """Same month/day `years_back` years earlier (29 Feb -> 28 Feb)."""
+    try:
+        return d.replace(year=d.year - years_back)
+    except ValueError:
+        return d.replace(year=d.year - years_back, day=28)
+
+
+def _align_entries_to_fiscal_period(entries, period_end):
+    """Re-key extracted entries to the filing's own fiscal years.
+
+    Models label a March year-end inconsistently — the year ended 31 March
+    2026 comes back as "2026" with a calendar period, or as "2025" (its
+    start year) — so two filings can put different fiscal years under one
+    reporting_year. Column *order* is reliable, so: the newest label is the
+    filing's period_end, each consecutive earlier label is one year back,
+    and the reporting period is derived from that. Labels that skip a year
+    (baselines, mislabels) are dropped; other filings cover those years.
+    """
+    if not entries or period_end is None:
+        return entries
+    labels = sorted({e["reporting_year"] for e in entries}, reverse=True)
+    top = labels[0]
+    consecutive = set()
+    expected = top
+    for lab in labels:
+        if lab != expected:
+            break
+        consecutive.add(lab)
+        expected -= 1
+
+    aligned = []
+    for e in entries:
+        lab = e["reporting_year"]
+        if lab not in consecutive:
+            log.info(f"    Year label {lab}: not consecutive with {top}, dropped "
+                     "(baseline or mislabelled comparative)")
+            continue
+        offset = top - lab
+        fy_end = _shift_years(period_end, offset)
+        fy_start = _shift_years(fy_end, 1) + timedelta(days=1)
+        e = dict(e)
+        e["reporting_year"] = fy_end.year
+        e["period_start"] = fy_start.isoformat()
+        e["period_end"] = fy_end.isoformat()
+        aligned.append(e)
+    return aligned
+
+
 _NON_MASS_UNIT = re.compile(
     r"%|percent|intensit|\bper\b|change|index|ratio|target|baseline", re.I)
 
@@ -514,7 +563,7 @@ def _extract_emissions_round(
 def _extract_emissions_from_document(
     url, title, source_type, table_dicts, tables_md,
     company, company_name, client, session, covered_years,
-    target_year=None, events=None,
+    target_year=None, events=None, fiscal_period_end=None,
 ):
     """Extract emissions from one parsed document and save them. Returns count saved.
 
@@ -767,6 +816,11 @@ def _extract_emissions_from_document(
                 raise
             except Exception as e:
                 log.warning(f"    ESEF section {idx} extraction failed: {e}")
+        if all_entries and fiscal_period_end is not None:
+            all_entries = _align_entries_to_fiscal_period(all_entries, fiscal_period_end)
+            seen_years = {e["reporting_year"] for e in all_entries}
+            log.info(f"    Aligned to filing period ending {fiscal_period_end}: "
+                     f"years {sorted(seen_years)}")
 
     # ── HTML path: table ranking + text fallback ───────────────────────
     if not all_entries and source_type == "html":
@@ -1048,6 +1102,7 @@ def _run_regulatory_emissions_tier(
                 "esef", table_dicts, list(sections),
                 company, company_name, client, session, covered_years,
                 target_year=year, events=events,
+                fiscal_period_end=_parse_date(f["period_end"]),
             )
             saved += n
             log.info(f"  Tier 0 ESEF: FY{year}: saved {n} record(s)")
