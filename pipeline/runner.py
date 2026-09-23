@@ -1094,7 +1094,11 @@ def _run_regulatory_emissions_tier(
         year = f["year"]
         if year < TARGET_START_YEAR:
             break
-        if year not in missing and (year - 1) not in missing:
+        # Every filing whose own year is wanted is fetched, even if a later
+        # report's comparative already covered it: a year's own annual report
+        # is the primary record and comparatives are only a fallback (they
+        # are the columns the extractor most often gets wrong).
+        if year not in target and (year - 1) not in missing:
             continue
         try:
             log.info(f"  Tier 0 ESEF: FY{year} report ({f['country']}) "
