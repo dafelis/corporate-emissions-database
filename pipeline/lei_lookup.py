@@ -34,11 +34,12 @@ _VEHICLE_TOKENS = re.compile(
 )
 
 # Typical subsidiary markers; penalised (not rejected) unless the search
-# name itself contains them.
+# name itself contains them. "Limited" is deliberately absent: it appears
+# inside "PUBLIC LIMITED COMPANY", and listed parents in other markets are
+# "Limited" too — the listed-form bonus already ranks PLC above LIMITED.
 _SUBSIDIARY_TOKENS = re.compile(
     r"\b(holdings?|finance|financing|funding|investments?|international|"
-    r"treasury|services|capital|b\.?v\.?|dac|s\.?[àa]\s?r\.?l\.?|gmbh|llc|"
-    r"limited|ltd)\b",
+    r"treasury|services|capital|b\.?v\.?|dac|s\.?[àa]\s?r\.?l\.?|gmbh|llc)\b",
     re.I,
 )
 
@@ -82,26 +83,44 @@ def _squash(name: str, strict: bool = False) -> str:
     kept, so that "RELX PLC" is an exact match for "RELX" but "RELX GROUP
     PLC" is not.
     """
-    s = re.sub(r"[^a-z0-9]", "", name.lower())
+    # Keep non-Latin letters: stripping them collapsed a Greek subsidiary
+    # "COCA - COLA HBC ΥΠΗΡΕΣΙΕΣ ..." to "cocacolahbc", an exact match.
+    s = re.sub(r"[\W_]", "", name.lower())
     suffixes = ["publiclimitedcompany", "plc", "limited", "ltd"]
     if not strict:
         suffixes += ["group", "holdings"]
     for suffix in suffixes:
-        if s.endswith(suffix) and len(s) > len(suffix) + 2:
+        if s.endswith(suffix) and len(s) > len(suffix) + 1:  # "bpplc" -> "bp"
             s = s[: -len(suffix)]
     return s
 
 
-def _name_similarity(search_name: str, legal_name: str) -> float:
-    """0–1: word overlap, or high if one squashed name contains the other."""
+def _one_name_similarity(search_name: str, legal_name: str) -> float:
+    """0–1: word overlap, or high if one squashed name contains the other.
+
+    Very short names ("BP", "DCC") match only exactly — otherwise "BP"
+    is contained in every BP subsidiary.
+    """
     a, b = _words(search_name), _words(legal_name)
     overlap = len(a & b) / max(len(a), len(b)) if a and b else 0.0
     sa, sb = _squash(search_name), _squash(legal_name)
     if sa and sb and (sa == sb):
         return 1.0
+    if len(sa) <= 3:
+        return 0.0
     if sa and sb and len(sa) >= 4 and (sa in sb or sb in sa):
         return max(overlap, 0.8)
     return overlap
+
+
+def _name_similarity(search_name: str, legal_name: str, other_names: list[str] | None = None) -> float:
+    """Best similarity across the legal name and GLEIF's other/previous names.
+
+    Renamed companies (Intermediate Capital Group -> ICG plc, Spirax-Sarco
+    -> Spirax Group) are found through their previous legal name.
+    """
+    names = [legal_name] + [n for n in (other_names or []) if n]
+    return max(_one_name_similarity(search_name, n) for n in names)
 
 
 def _record_to_candidate(record: dict) -> dict:
@@ -113,9 +132,11 @@ def _record_to_candidate(record: dict) -> dict:
     return {
         "lei": record.get("id") or record.get("attributes", {}).get("lei"),
         "legal_name": entity.get("legalName", {}).get("name", ""),
+        "other_names": [o.get("name") for o in entity.get("otherNames", []) or [] if o.get("name")],
         "country": country,
         "category": entity.get("category"),
         "legal_form": (entity.get("legalForm") or {}).get("id"),
+        "status": entity.get("status"),
     }
 
 
@@ -125,6 +146,25 @@ def _search_gleif(query: str, size: int = 20) -> list[dict]:
         GLEIF_SEARCH,
         params={
             "filter[fulltext]": query,
+            "filter[entity.status]": "ACTIVE",
+            "page[size]": size,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return [_record_to_candidate(r) for r in resp.json().get("data", [])]
+
+
+def _search_gleif_legal_name(query: str, size: int = 10) -> list[dict]:
+    """GLEIF legal-name filter: matches on the legal name field only.
+
+    Full-text search tokenises "P.L.C." differently from "plc" and buries
+    "BP P.L.C." under hundreds of BP subsidiaries; this filter finds it.
+    """
+    resp = httpx.get(
+        GLEIF_SEARCH,
+        params={
+            "filter[entity.legalName]": query,
             "filter[entity.status]": "ACTIVE",
             "page[size]": size,
         },
@@ -190,13 +230,15 @@ def lookup_lei_by_isin(isin: str) -> dict | None:
 
 def _score(cand: dict, search_name: str) -> float:
     """Similarity plus structural preferences for the listed parent."""
-    score = _name_similarity(search_name, cand["legal_name"])
+    score = _name_similarity(search_name, cand["legal_name"], cand.get("other_names"))
     legal = cand["legal_name"].upper()
     search_has_sub = bool(_SUBSIDIARY_TOKENS.search(search_name))
-    if re.search(r"\b(PLC|PUBLIC LIMITED COMPANY|SE|N\.?V\.?|S\.?A\.?|AG|SPA|S\.?P\.?A\.?)\s*$", legal):
+    if re.search(r"\b(P\.?L\.?C\.?|PUBLIC LIMITED COMPANY|SE|N\.?V\.?|S\.?A\.?|AG|SPA|S\.?P\.?A\.?)\s*$", legal):
         score += 0.15  # listed-company legal forms
-    if _squash(search_name, strict=True) == _squash(cand["legal_name"], strict=True):
-        score += 0.3  # exactly "<name> PLC"
+    target = _squash(search_name, strict=True)
+    if any(_squash(n, strict=True) == target
+           for n in [cand["legal_name"]] + (cand.get("other_names") or [])):
+        score += 0.3  # exactly "<name> PLC" (now or formerly)
     if _SUBSIDIARY_TOKENS.search(legal) and not search_has_sub:
         score -= 0.25
     return score
@@ -207,11 +249,13 @@ def _best_match(candidates: list[dict], search_name: str) -> dict | None:
     search_has_vehicle_word = bool(_VEHICLE_TOKENS.search(search_name))
     scored = []
     for c in candidates:
+        if (c.get("status") or "ACTIVE") != "ACTIVE":
+            continue  # e.g. an inactive Belgian "Prudential"
         if (c.get("category") or "GENERAL") != "GENERAL":
             continue
         if _VEHICLE_TOKENS.search(c["legal_name"]) and not search_has_vehicle_word:
             continue
-        similarity = _name_similarity(search_name, c["legal_name"])
+        similarity = _name_similarity(search_name, c["legal_name"], c.get("other_names"))
         if similarity < 0.3:
             continue
         scored.append((_score(c, search_name), similarity, c))
@@ -255,8 +299,9 @@ def lookup_lei(company_name: str, ticker: str | None = None) -> dict | None:
             cand = lookup_lei_by_isin(isin)
         except Exception:
             cand = None
-        if cand and (cand.get("category") or "GENERAL") == "GENERAL":
-            similarity = _name_similarity(search_name, cand["legal_name"])
+        if (cand and (cand.get("category") or "GENERAL") == "GENERAL"
+                and (cand.get("status") or "ACTIVE") == "ACTIVE"):
+            similarity = _name_similarity(search_name, cand["legal_name"], cand.get("other_names"))
             if similarity >= 0.3:
                 country_ok = cand["country"] in ALLOWED_COUNTRIES
                 return {
@@ -278,6 +323,13 @@ def lookup_lei(company_name: str, ticker: str | None = None) -> dict | None:
             pass
         try:
             candidates.extend(_fuzzy_gleif(query))
+        except Exception:
+            pass
+    # The listed parent's exact legal name, in its three spellings.
+    for query in dict.fromkeys([f"{search_name} plc", f"{search_name} p.l.c.",
+                                f"{search_name} public limited company"]):
+        try:
+            candidates.extend(_search_gleif_legal_name(query))
         except Exception:
             pass
 
