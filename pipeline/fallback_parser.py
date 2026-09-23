@@ -373,6 +373,10 @@ def _strategy_playwright(url: str, source_type: str, llama_key: str) -> list[dic
                 if len(body) < 500:
                     raise ValueError("Playwright: PDF response too small")
                 if not body[:5].startswith(b"%PDF"):
+                    blocked = _looks_blocked(body[:4000].decode("utf-8", "replace"))
+                    if blocked:
+                        raise ValueError(
+                            f"Playwright: blocked by bot protection ({blocked!r})")
                     raise ValueError(
                         "Playwright: response is not a PDF "
                         "(site may have returned an HTML page)"
