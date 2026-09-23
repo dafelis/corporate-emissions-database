@@ -451,8 +451,20 @@ def _align_entries_to_fiscal_period(entries, period_end):
         fy_start = _shift_years(fy_end, 1) + timedelta(days=1)
         e = dict(e)
         e["reporting_year"] = fy_end.year
-        e["period_start"] = fy_start.isoformat()
-        e["period_end"] = fy_end.isoformat()
+        # Keep the document's own period when it is plausible: a GHG
+        # reporting period can legitimately differ from the financial year
+        # (BAE reports 1 Nov–31 Oct inside a December year-end). Override
+        # only when it is missing or inconsistent with the filing — e.g. a
+        # calendar period claimed for a year that ends on 31 March.
+        m_start, m_end = _parse_date(e.get("period_start")), _parse_date(e.get("period_end"))
+        plausible = (
+            m_start is not None and m_end is not None
+            and abs((m_end - fy_end).days) <= 92
+            and 330 <= (m_end - m_start).days <= 400
+        )
+        if not plausible:
+            e["period_start"] = fy_start.isoformat()
+            e["period_end"] = fy_end.isoformat()
         aligned.append(e)
     return aligned
 
