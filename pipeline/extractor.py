@@ -192,8 +192,13 @@ def extract_emissions_from_text(
     company_name: str,
     client: anthropic.Anthropic,
     model: str = "claude-haiku-4-5-20251001",
+    context: str = "",
 ) -> dict:
-    """Extract emissions data from free-form text (fallback when no tables found)."""
+    """Extract emissions data from free-form text (fallback when no tables found).
+
+    `context` is prepended to the request — e.g. which financial year the
+    document covers, so multi-year columns are labelled consistently.
+    """
     response = client.messages.create(
         model=model,
         max_tokens=8192,
@@ -230,7 +235,8 @@ def extract_emissions_from_text(
             {
                 "role": "user",
                 "content": (
-                    f"Extract all greenhouse gas emissions data for {company_name} "
+                    (f"{context}\n\n" if context else "")
+                    + f"Extract all greenhouse gas emissions data for {company_name} "
                     f"from this document text:\n\n{text}"
                 ),
             }

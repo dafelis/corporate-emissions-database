@@ -768,10 +768,22 @@ def _extract_emissions_from_document(
 
     # ── ESEF path: pre-ranked text sections from a regulatory filing ────
     if not all_entries and source_type == "esef":
+        fy_context = ""
+        if fiscal_period_end is not None:
+            fy = fiscal_period_end.year
+            fy_context = (
+                f"CONTEXT: this text is from {company_name}'s annual report for the "
+                f"financial year ended {fiscal_period_end:%d %B %Y}. In any multi-year "
+                f"table the column for that year is the current year — label it "
+                f"reporting_year {fy}; the other columns are prior-year comparatives "
+                f"({fy - 1}, {fy - 2}). Label every year by the calendar year in which "
+                f"its financial year ENDS, and keep each column's values with its own year."
+            )
         for idx, section in enumerate(tables_md[:6]):
             try:
                 extraction = extract_emissions_from_text(
-                    section, company_name, client, model=MODEL_FAST)
+                    section, company_name, client, model=MODEL_FAST,
+                    context=fy_context)
                 if not (extraction and extraction.get("emissions")):
                     continue
                 confidence = extraction.get("confidence_score", 0) or 0
@@ -937,8 +949,13 @@ def _extract_emissions_from_document(
                 different_source = existing_record.source_id != source.id
 
                 if values_differ and different_source:
-                    # Different source reports different values — keep both
-                    # (likely a restatement in a later report)
+                    # Different source reports different values — keep both.
+                    # A year's own filing is the primary record; a later
+                    # report's differing comparative is the restatement.
+                    own_filing = (fiscal_period_end is not None
+                                  and year == fiscal_period_end.year)
+                    if own_filing and not existing_record.is_restated:
+                        existing_record.is_restated = True
                     restated = EmissionsRecord(
                         company_id=company.id,
                         reporting_year=year,
@@ -954,15 +971,15 @@ def _extract_emissions_from_document(
                         methodology_notes=methodology_notes,
                         source_id=source.id,
                         confidence_score=best_confidence,
-                        is_restated=True,
+                        is_restated=not own_filing,
                         review_status="pending",
                         extraction_date=datetime.utcnow(),
                     )
                     session.add(restated)
                     saved += 1
-                    log.info(f"    Year {year}: RESTATED — kept both values "
-                             f"(old source #{existing_record.source_id}, "
-                             f"new source #{source.id})")
+                    log.info(f"    Year {year}: values differ from source "
+                             f"#{existing_record.source_id} — kept both; primary is "
+                             f"{'this filing (own year)' if own_filing else 'the existing record'}")
                     continue
 
                 # Same source or compatible values — fill gaps
