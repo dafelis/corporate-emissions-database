@@ -352,11 +352,22 @@ def _strategy_playwright(url: str, source_type: str, llama_key: str) -> list[dic
 
         try:
             if source_type == "pdf":
-                # Navigate to the PDF — Chromium returns raw bytes in response
-                response = page.goto(url, timeout=60_000)
-                if response is None or not response.ok:
-                    status = response.status if response else "no response"
-                    raise ValueError(f"Playwright: HTTP {status}")
+                # Fetch through the browser context rather than navigating:
+                # Chromium treats a PDF URL as a download and page.goto()
+                # raises "Download is starting". The context request shares
+                # the browser's cookies, headers and TLS fingerprint, so a
+                # challenge cookie obtained by visiting the site still applies.
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                origin = f"{parsed.scheme}://{parsed.netloc}/"
+                try:
+                    page.goto(origin, timeout=20_000, wait_until="domcontentloaded")
+                except Exception:
+                    pass  # origin unreachable is not fatal — try the PDF anyway
+
+                response = context.request.get(url, timeout=60_000)
+                if not response.ok:
+                    raise ValueError(f"Playwright: HTTP {response.status}")
 
                 body = response.body()
                 if len(body) < 500:
