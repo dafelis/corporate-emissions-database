@@ -777,7 +777,13 @@ def _extract_emissions_from_document(
                 f"table the column for that year is the current year — label it "
                 f"reporting_year {fy}; the other columns are prior-year comparatives "
                 f"({fy - 1}, {fy - 2}). Label every year by the calendar year in which "
-                f"its financial year ENDS, and keep each column's values with its own year."
+                f"its financial year ENDS, and keep each column's values with its own year. "
+                f"LAYOUT WARNING: this text is flattened from a table, one cell per line, "
+                f"in reading order. A year often has several sub-columns (e.g. 'UK' and "
+                f"'Global', or 'Group' and a segment) — count the header cells and pair "
+                f"every number with the right year AND sub-column before extracting. "
+                f"Report the Global/Group total for each year, never a regional or "
+                f"segment sub-column, and never reuse one year's number for another year."
             )
         for idx, section in enumerate(tables_md[:6]):
             try:
@@ -1056,6 +1062,54 @@ def _extract_emissions_from_document(
     return saved
 
 
+def _resolve_esef_primaries(session, company, target):
+    """Pick each year's primary record by agreement across filings.
+
+    A year can appear in its own annual report and as a comparative in the
+    next two. The extractor misreads a column now and then — usually a
+    comparative, occasionally the current year — so the value that the
+    most filings agree on (Scope 1 and location-based Scope 2, rounded)
+    becomes primary; ties go to the year's own filing. The others are
+    kept, flagged is_restated, so a genuine restatement stays visible.
+    """
+    rows = (
+        session.query(EmissionsRecord)
+        .join(Source, EmissionsRecord.source_id == Source.id)
+        .filter(EmissionsRecord.company_id == company.id,
+                Source.document_type == "esef",
+                EmissionsRecord.reporting_year.in_(list(target)))
+        .all()
+    )
+    by_year = {}
+    for r in rows:
+        by_year.setdefault(r.reporting_year, []).append(r)
+
+    for year, recs in by_year.items():
+        if len(recs) < 2:
+            continue
+        def key(r):
+            return (None if r.scope_1 is None else round(r.scope_1),
+                    None if r.scope_2_location is None else round(r.scope_2_location))
+        groups = {}
+        for r in recs:
+            groups.setdefault(key(r), []).append(r)
+
+        def own_year(r):
+            src = session.get(Source, r.source_id)
+            return bool(src and f"FY{year} " in (src.title or ""))
+
+        best = max(groups.values(),
+                   key=lambda g: (len(g), any(own_year(r) for r in g)))
+        primary = next((r for r in best if own_year(r)), best[0])
+        for r in recs:
+            r.is_restated = (r is not primary)
+        if len(groups) > 1:
+            log.info(f"    Year {year}: {len(recs)} ESEF records, {len(groups)} distinct "
+                     f"values — primary S1={primary.scope_1} S2loc={primary.scope_2_location} "
+                     f"({len(best)} filing(s) agree{', own year' if own_year(primary) else ''})")
+    session.commit()
+
+
 def _run_regulatory_emissions_tier(
     company, company_name, client, session, covered_years, target, events=None,
 ):
@@ -1135,6 +1189,9 @@ def _run_regulatory_emissions_tier(
         missing = target - covered_years
         if not missing:
             break
+
+    if filings:
+        _resolve_esef_primaries(session, company, target)
 
     # ── UK NSM PDFs for years still missing (pre-ESEF) ──────────────────
     if missing:
