@@ -15,7 +15,9 @@ websites do (e.g. Imperva Incapsula on baesystems.com).
 import html
 import json
 import logging
+import os
 import re
+import tempfile
 
 import requests
 
@@ -32,8 +34,19 @@ _HEADERS = {
     ),
 }
 
-# Refuse to load absurdly large filings into memory on a small instance.
+# Refuse absurdly large filings outright.
 _MAX_REPORT_BYTES = 150 * 1024 * 1024
+
+# An ESEF report runs to 30–70 MB of XHTML but its GHG table is a few KB, so
+# only regions around these markers are converted to text. Converting a whole
+# report cost several hundred MB of intermediate strings and OOM-killed the
+# pipeline on a 2 GB instance at concurrency 4.
+_GHG_MARKERS = (
+    b"greenhouse gas", b"ghg emission", b"scope 1", b"scope 2",
+    b"co2e", b"tco2", b"carbon dioxide equivalent",
+)
+_RAW_WINDOW = 150_000       # bytes of raw XHTML kept either side of a marker
+_MAX_WINDOW_BYTES = 12 * 1024 * 1024   # ceiling on the total kept
 
 
 # ── filings.xbrl.org ──────────────────────────────────────────────────────
@@ -73,21 +86,117 @@ def find_esef_filings(lei: str, timeout: int = 40) -> list[dict]:
     return out
 
 
-def fetch_esef_report_text(report_url: str, timeout: int = 180) -> str:
-    """Download an ESEF XHTML report and return normalised plain text."""
-    resp = requests.get(report_url, headers=_HEADERS, timeout=timeout, stream=True)
+def _stream_to_tempfile(url: str, timeout: int) -> tuple[str, int]:
+    """Stream a URL to a temporary file. Returns (path, size)."""
+    resp = requests.get(url, headers=_HEADERS, timeout=timeout, stream=True)
     resp.raise_for_status()
-    size = int(resp.headers.get("Content-Length") or 0)
-    if size > _MAX_REPORT_BYTES:
-        raise ValueError(f"ESEF report too large ({size:,} bytes)")
-    chunks, total = [], 0
-    for chunk in resp.iter_content(1 << 20):
-        total += len(chunk)
-        if total > _MAX_REPORT_BYTES:
-            raise ValueError(f"ESEF report too large (>{_MAX_REPORT_BYTES:,} bytes)")
-        chunks.append(chunk)
-    xhtml = b"".join(chunks).decode("utf-8", "replace")
-    return _normalise_text(_xhtml_to_text(xhtml))
+    declared = int(resp.headers.get("Content-Length") or 0)
+    if declared > _MAX_REPORT_BYTES:
+        raise ValueError(f"ESEF report too large ({declared:,} bytes)")
+
+    fd, path = tempfile.mkstemp(suffix=".xhtml")
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as f:
+            for chunk in resp.iter_content(1 << 20):
+                total += len(chunk)
+                if total > _MAX_REPORT_BYTES:
+                    raise ValueError(
+                        f"ESEF report too large (>{_MAX_REPORT_BYTES:,} bytes)")
+                f.write(chunk)
+    except Exception:
+        os.unlink(path)
+        raise
+    return path, total
+
+
+def _marker_offsets(path: str, chunk_size: int = 1 << 20) -> list[int]:
+    """Byte offsets of every GHG marker in a file, case-insensitively."""
+    overlap = max(len(m) for m in _GHG_MARKERS) - 1
+    offsets: list[int] = []
+    tail = b""
+    file_pos = 0
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            buf = tail + chunk
+            buf_start = file_pos - len(tail)
+            low = buf.lower()
+            for marker in _GHG_MARKERS:
+                start = 0
+                while True:
+                    i = low.find(marker, start)
+                    if i < 0:
+                        break
+                    offsets.append(buf_start + i)
+                    start = i + 1
+            file_pos += len(chunk)
+            tail = buf[-overlap:] if overlap else b""
+    return sorted(set(offsets))
+
+
+def _marker_windows(offsets: list[int], size: int) -> list[tuple[int, int]]:
+    """Merge marker offsets into byte ranges, densest first, under the cap.
+
+    Windows are chosen by how many markers they contain rather than by
+    position: the GHG table is usually late in the document, so taking the
+    earliest windows would be exactly the wrong heuristic.
+    """
+    merged: list[list[int]] = []
+    counts: list[int] = []
+    for off in offsets:
+        s, e = max(0, off - _RAW_WINDOW), min(size, off + _RAW_WINDOW)
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+            counts[-1] += 1
+        else:
+            merged.append([s, e])
+            counts.append(1)
+
+    ranked = sorted(zip(counts, merged), key=lambda t: t[0], reverse=True)
+    kept, total = [], 0
+    for _, (s, e) in ranked:
+        if total + (e - s) > _MAX_WINDOW_BYTES:
+            continue
+        kept.append((s, e))
+        total += e - s
+    return sorted(kept)
+
+
+def fetch_esef_report_text(report_url: str, timeout: int = 180) -> str:
+    """Return normalised text of an ESEF report's GHG-relevant regions.
+
+    The report is streamed to disk, scanned for emissions markers, and only
+    generous windows around them are converted — peak memory is a few MB
+    rather than the several hundred that converting the whole document
+    costs. Returns "" when the report mentions no emissions terms at all.
+    """
+    path, size = _stream_to_tempfile(report_url, timeout)
+    try:
+        offsets = _marker_offsets(path)
+        if not offsets:
+            log.info("    No GHG markers in report (%.1f MB)", size / 1e6)
+            return ""
+        windows = _marker_windows(offsets, size)
+        kept = sum(e - s for s, e in windows)
+        log.info("    %.1f MB report, %d marker hit(s), %d window(s), %.1f MB converted",
+                 size / 1e6, len(offsets), len(windows), kept / 1e6)
+
+        parts = []
+        with open(path, "rb") as f:
+            for start, end in windows:
+                f.seek(start)
+                raw = f.read(end - start).decode("utf-8", "replace")
+                parts.append(_normalise_text(_xhtml_to_text(raw)))
+                del raw
+        return "\n\n".join(parts)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _xhtml_to_text(xhtml: str) -> str:
