@@ -201,6 +201,39 @@ def _text_from_html(html: str) -> str:
     return soup.get_text(separator="\n", strip=True)[:50_000]
 
 
+# Text that only ever appears on a WAF / bot-protection challenge page.
+# Such pages return HTTP 200 and clear the minimum-length check, so without
+# this they get passed to the LLM as if they were the document.
+_BLOCK_SIGNATURES = (
+    "incapsula incident id",
+    "_incapsula_resource",
+    "request unsuccessful.",
+    "just a moment...",
+    "checking your browser before accessing",
+    "cf-browser-verification",
+    "attention required! | cloudflare",
+    "enable javascript and cookies to continue",
+    "pardon our interruption",
+    "verify you are human",
+    "you don't have permission to access",
+)
+
+
+def _looks_blocked(text: str) -> str | None:
+    """Return the matching signature if `text` is a bot-protection page, else None.
+
+    Only short bodies are considered: challenge pages are a few hundred bytes,
+    and a real report could legitimately contain one of these phrases.
+    """
+    low = (text or "").lower()
+    if len(low) > 5_000:
+        return None
+    for sig in _BLOCK_SIGNATURES:
+        if sig in low:
+            return sig
+    return None
+
+
 # ── Callback protocol for UI integration ─────────────────────────────
 
 class ParseProgress:
@@ -247,6 +280,9 @@ def _strategy_direct(url: str, source_type: str, llama_key: str) -> list[dict]:
         from pipeline.parser import extract_html_text
 
         text = extract_html_text(url)
+        blocked = _looks_blocked(text)
+        if blocked:
+            raise ValueError(f"Blocked by bot protection ({blocked!r})")
         if text and len(text.strip()) > 100:
             return [{"markdown": text}]
         raise ValueError("Direct fetch: no tables or text found")
@@ -274,6 +310,10 @@ def _strategy_exa_cache(url: str, exa_key: str) -> list[dict]:
         raise ValueError("Exa has no cached content for this URL")
 
     text = getattr(response.results[0], "text", None)
+    blocked = _looks_blocked(text)
+    if blocked:
+        # Exa's crawler was blocked too — its "cached content" is the challenge page
+        raise ValueError(f"Exa cache is a bot-protection page ({blocked!r})")
     if not text or len(text.strip()) < 100:
         raise ValueError(f"Exa cache too short ({len(text or '')} chars)")
 
@@ -341,6 +381,10 @@ def _strategy_playwright(url: str, source_type: str, llama_key: str) -> list[dic
                 page.goto(url, timeout=30_000, wait_until="networkidle")
                 html = page.content()
 
+                blocked = _looks_blocked(_text_from_html(html))
+                if blocked:
+                    raise ValueError(f"Playwright: blocked by bot protection ({blocked!r})")
+
                 tables = _tables_from_html(html)
                 if tables:
                     return tables
@@ -393,6 +437,9 @@ def _strategy_wayback(url: str, source_type: str, llama_key: str) -> list[dict]:
             wm_tag.decompose()
 
         html = str(soup)
+        blocked = _looks_blocked(_text_from_html(html))
+        if blocked:
+            raise ValueError(f"Wayback: archived copy is a bot-protection page ({blocked!r})")
         tables = _tables_from_html(html)
         if tables:
             return tables
