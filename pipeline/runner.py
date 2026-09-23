@@ -750,8 +750,10 @@ def _extract_emissions_from_document(
                 best_confidence = max(best_confidence, confidence)
                 # A market-based figure can only come from a section that
                 # talks about market-based reporting; otherwise it's invented
-                # (seen: 0, or a copy of the location-based value).
-                section_has_market = "market" in section.lower()
+                # (seen: 0, or a copy of the location-based value). Must be
+                # the phrase — these windows also contain prose like
+                # "emerging markets".
+                section_has_market = re.search(r"market[\s-]*based", section, re.I) is not None
                 new_years = []
                 for entry in extraction["emissions"]:
                     if not section_has_market:
