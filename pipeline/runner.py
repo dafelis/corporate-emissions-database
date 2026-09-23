@@ -24,8 +24,8 @@ from db.models import (
 from pipeline.searcher import search_for_emissions_source, search_for_annual_report, search_for_financial_history
 from pipeline.parser import (
     parse_pdf, extract_tables_from_documents, parse_html, parse_excel,
-    extract_html_text, detect_source_type, download_to_tempfile,
-    render_pdf_page,
+    extract_html_text, detect_source_type, sniff_source_type,
+    download_to_tempfile, render_pdf_page,
 )
 from pipeline.fallback_parser import parse_with_fallbacks
 from pipeline.extractor import (
@@ -320,7 +320,7 @@ def _get_financial_needs(session, company_id, target_years):
     return no_record | incomplete
 
 
-def _try_parse_candidates(candidates, searched_urls, llama_key, max_attempts=3):
+def _try_parse_candidates(candidates, searched_urls, llama_key, max_attempts=5):
     """Try to parse documents from a ranked candidate list, skipping 403s.
 
     Returns (url, title, source_type, table_dicts, tables_md) or raises if all fail.
@@ -337,7 +337,7 @@ def _try_parse_candidates(candidates, searched_urls, llama_key, max_attempts=3):
 
         attempts += 1
         searched_urls.add(url)
-        source_type = detect_source_type(url)
+        source_type = sniff_source_type(url)
         title = candidate["title"]
 
         try:

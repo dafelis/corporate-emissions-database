@@ -36,7 +36,13 @@ def download_to_tempfile(url: str) -> str:
         response = requests.get(url, headers=headers, timeout=(5, 60))
     response.raise_for_status()
 
-    is_pdf_url = url.lower().split("?")[0].endswith(".pdf")
+    # A PDF is a PDF whether or not the URL says so: many corporate CMSs
+    # serve reports from extensionless asset URLs (e.g. /dam/jcr:...).
+    is_pdf_url = (
+        url.lower().split("?")[0].endswith(".pdf")
+        or "application/pdf" in response.headers.get("content-type", "").lower()
+        or response.content[:5].startswith(b"%PDF")
+    )
     suffix = ".pdf" if is_pdf_url else ".html"
 
     # Validate PDF responses — some sites return HTML bot-block pages
@@ -227,3 +233,27 @@ def detect_source_type(url: str) -> str:
     if lower.endswith((".xlsx", ".xls")):
         return "excel"
     return "html"
+
+
+def sniff_source_type(url: str, timeout: float = 10) -> str:
+    """Like detect_source_type, but asks the server when the URL has no extension.
+
+    One HEAD request; the Content-Type (or a redirect to a .pdf) decides.
+    Falls back to the extension guess on any failure, so a blocked or slow
+    site costs nothing more than before.
+    """
+    guess = detect_source_type(url)
+    if guess != "html":
+        return guess
+    try:
+        resp = requests.head(url, headers=_BROWSER_HEADERS, timeout=timeout,
+                             allow_redirects=True)
+        ctype = resp.headers.get("content-type", "").lower()
+        final = resp.url.lower().split("?")[0]
+        if "application/pdf" in ctype or final.endswith(".pdf"):
+            return "pdf"
+        if "spreadsheet" in ctype or "ms-excel" in ctype or final.endswith((".xlsx", ".xls")):
+            return "excel"
+    except Exception:
+        pass
+    return guess
