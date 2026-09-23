@@ -10,6 +10,7 @@ so earlier years get skipped if already covered.
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, date as date_type
@@ -44,6 +45,7 @@ from pipeline.config import (
     CONFIDENCE_THRESHOLD, MODEL_FAST, MODEL_STRONG,
     BUDGET_PER_COMPANY, BUDGET_GLOBAL, VERIFICATION_SKIP_THRESHOLD,
     CONCURRENT_COMPANIES, REGULATORY_EMISSIONS_ENABLED,
+    ESEF_SECTION_MIN_CONFIDENCE,
 )
 from pipeline.regulatory_filings import (
     find_esef_filings, fetch_esef_report_text, find_ghg_sections,
@@ -406,6 +408,28 @@ def _source_quality(title):
     return 50
 
 
+_NON_MASS_UNIT = re.compile(
+    r"%|percent|intensit|\bper\b|change|index|ratio|target|baseline", re.I)
+
+
+def _plausible_emissions_entry(entry) -> tuple[bool, str]:
+    """Reject extraction artefacts that are not absolute emissions.
+
+    Seen in practice: a percentage-change row returned with the unit
+    'Percentage change, not absolute emissions'; a 2020 baseline total
+    copied into every scope field.
+    """
+    unit = entry.get("unit") or ""
+    if _NON_MASS_UNIT.search(unit):
+        return False, f"unit '{unit}' is not an absolute mass"
+    vals = [entry.get(k) for k in
+            ("scope_1", "scope_2_location", "scope_2_market", "scope_3")]
+    present = [v for v in vals if v is not None]
+    if len(present) >= 3 and len(set(present)) == 1:
+        return False, f"value {present[0]} repeated in every scope (total/baseline misassigned)"
+    return True, ""
+
+
 def _rank_evidence_pages(entry, filtered_pages, page_texts, top_n=3):
     """Rank filtered pages by likelihood of containing an extracted entry's values.
 
@@ -716,12 +740,22 @@ def _extract_emissions_from_document(
                     if stronger and stronger.get("emissions"):
                         extraction = stronger
                         confidence = extraction.get("confidence_score", 0) or 0
+                if confidence < ESEF_SECTION_MIN_CONFIDENCE:
+                    log.info(f"    ESEF section {idx}: conf={confidence} < "
+                             f"{ESEF_SECTION_MIN_CONFIDENCE}, ignored")
+                    continue
                 if matched_table_idx is None:
                     matched_table_idx = idx
                     methodology_notes = extraction.get("methodology_notes", "")
                 best_confidence = max(best_confidence, confidence)
+                # A market-based figure can only come from a section that
+                # talks about market-based reporting; otherwise it's invented
+                # (seen: 0, or a copy of the location-based value).
+                section_has_market = "market" in section.lower()
                 new_years = []
                 for entry in extraction["emissions"]:
+                    if not section_has_market:
+                        entry["scope_2_market"] = None
                     year = entry["reporting_year"]
                     if year in seen_years:
                         continue
@@ -831,6 +865,11 @@ def _extract_emissions_from_document(
                     and entry.get("scope_2_location") is None
                     and entry.get("scope_2_market") is None
                     and entry.get("scope_3") is None):
+                continue
+
+            plausible, why = _plausible_emissions_entry(entry)
+            if not plausible:
+                log.info(f"    Year {year}: rejected — {why}")
                 continue
 
             # Is this the year we explicitly searched for?

@@ -32,3 +32,8 @@ CONCURRENT_COMPANIES = 4
 # Tier 0 emissions: try regulatory annual-report filings (ESEF via
 # filings.xbrl.org, UK NSM PDFs) by LEI before any web search.
 REGULATORY_EMISSIONS_ENABLED = True
+
+# Ignore ESEF text sections whose extraction confidence is below this. The
+# GHG table scores 85–95; windows that merely mention "Scope 1" in passing
+# score 5–45 and only ever yield baselines and percentage changes.
+ESEF_SECTION_MIN_CONFIDENCE = 50

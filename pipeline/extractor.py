@@ -154,7 +154,12 @@ def extract_emissions(
                 "For example, 'year ended 31 March 2025' means period_start='2024-04-01', "
                 "period_end='2025-03-31'. If not stated, set both to null. "
                 "Note any methodology information, restatements, or caveats. "
-                "If a scope is not present in the table, set its value to null. "
+                "If a scope is not present in the table, set its value to null — never "
+                "use 0 to mean 'not reported'. Report scope_2_market ONLY when the table "
+                "explicitly labels a figure as market-based; otherwise leave it null. "
+                "A baseline figure, a target, a combined Scope 1+2 total or a percentage "
+                "change must NEVER be written into individual scope fields — if those "
+                "are the only figures given for a year, omit that year entirely. "
                 "Be precise — extract the exact numbers from the table."
             ),
             "cache_control": {"type": "ephemeral"},
@@ -211,7 +216,12 @@ def extract_emissions_from_text(
                 "'year ended 31 December', 'for the 12 months to 31 March', 'calendar year', "
                 "'FY2025' etc. Set period_start and period_end as YYYY-MM-DD dates. "
                 "If not stated, set both to null. "
-                "If a scope is not found, set its value to null. "
+                "If a scope is not found, set its value to null — never use 0 to mean "
+                "'not reported'. Report scope_2_market ONLY when the document explicitly "
+                "labels a figure as market-based; otherwise leave it null. "
+                "A baseline figure, a target, a combined Scope 1+2 total or a percentage "
+                "change must NEVER be written into individual scope fields — if those "
+                "are the only figures given for a year, omit that year entirely. "
                 "Be precise — extract exact numbers only, do not estimate."
             ),
             "cache_control": {"type": "ephemeral"},
