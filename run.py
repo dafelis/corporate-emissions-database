@@ -306,6 +306,26 @@ def cmd_lei(args):
     from pipeline.lei_lookup import lookup_lei
 
     session = get_session(config["DATABASE_URL"])
+
+    if args.set:
+        if not args.id:
+            print("--set requires --id")
+            sys.exit(1)
+        import httpx
+        company = session.get(Company, args.id)
+        resp = httpx.get(f"https://api.gleif.org/api/v1/lei-records/{args.set}", timeout=30)
+        resp.raise_for_status()
+        entity = resp.json()["data"]["attributes"]["entity"]
+        company.lei = args.set
+        company.lei_legal_name = entity["legalName"]["name"]
+        company.lei_country = entity.get("legalAddress", {}).get("country")
+        company.lei_confidence = "high"
+        company.lei_flag_reason = "set manually"
+        company.lei_review_status = "approved"
+        session.commit()
+        print(f"  {company.id:3d} {company.name}: set to {args.set} ({company.lei_legal_name}, {company.lei_country})")
+        return
+
     if args.id:
         companies = [session.get(Company, args.id)]
     else:
@@ -533,6 +553,8 @@ def main():
     # lei
     lei_parser = subparsers.add_parser("lei", help="Re-resolve LEIs (ISIN-first) and report changes")
     lei_parser.add_argument("--id", type=int, help="Refresh a single company by ID")
+    lei_parser.add_argument("--set", type=str, metavar="LEI",
+                            help="With --id: set this LEI manually (verified against GLEIF)")
     lei_parser.add_argument("--dry-run", action="store_true", help="Report changes without writing")
     lei_parser.add_argument("--verbose", action="store_true", help="Also list unchanged companies")
 

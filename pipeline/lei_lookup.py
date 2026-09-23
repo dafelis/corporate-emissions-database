@@ -101,14 +101,14 @@ def _one_name_similarity(search_name: str, legal_name: str) -> float:
     Very short names ("BP", "DCC") match only exactly — otherwise "BP"
     is contained in every BP subsidiary.
     """
-    a, b = _words(search_name), _words(legal_name)
-    overlap = len(a & b) / max(len(a), len(b)) if a and b else 0.0
     sa, sb = _squash(search_name), _squash(legal_name)
     if sa and sb and (sa == sb):
         return 1.0
     if len(sa) <= 3:
-        return 0.0
-    if sa and sb and len(sa) >= 4 and (sa in sb or sb in sa):
+        return 0.0  # "DCC" vs "DCC ENERGY PLC": exact or nothing
+    a, b = _words(search_name), _words(legal_name)
+    overlap = len(a & b) / max(len(a), len(b)) if a and b else 0.0
+    if sa and sb and (sa in sb or sb in sa):
         return max(overlap, 0.8)
     return overlap
 
@@ -233,12 +233,22 @@ def _score(cand: dict, search_name: str) -> float:
     score = _name_similarity(search_name, cand["legal_name"], cand.get("other_names"))
     legal = cand["legal_name"].upper()
     search_has_sub = bool(_SUBSIDIARY_TOKENS.search(search_name))
-    if re.search(r"\b(P\.?L\.?C\.?|PUBLIC LIMITED COMPANY|SE|N\.?V\.?|S\.?A\.?|AG|SPA|S\.?P\.?A\.?)\s*$", legal):
-        score += 0.15  # listed-company legal forms
+    listed_form = bool(re.search(
+        r"\b(P\.?L\.?C\.?|PUBLIC LIMITED COMPANY|SE|N\.?V\.?|S\.?A\.?|AG|SPA|S\.?P\.?A\.?)\s*$",
+        legal))
+    if listed_form:
+        score += 0.25
     target = _squash(search_name, strict=True)
-    if any(_squash(n, strict=True) == target
-           for n in [cand["legal_name"]] + (cand.get("other_names") or [])):
-        score += 0.3  # exactly "<name> PLC" (now or formerly)
+    exact_now = _squash(cand["legal_name"], strict=True) == target
+    exact_before = any(_squash(n, strict=True) == target for n in cand.get("other_names") or [])
+    if exact_now:
+        # "BURBERRY LIMITED" is an exact name match too, but the listed
+        # parent is BURBERRY GROUP PLC: the exact bonus needs a listed form.
+        score += 0.3 if listed_form else 0.1
+    elif exact_before:
+        # A previous legal name counts for less: "RENTOKIL INITIAL 1927 PLC"
+        # used to be called RENTOKIL INITIAL PLC — the parent still is.
+        score += 0.15 if listed_form else 0.05
     if _SUBSIDIARY_TOKENS.search(legal) and not search_has_sub:
         score -= 0.25
     return score
