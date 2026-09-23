@@ -43,8 +43,13 @@ from pipeline.config import (
     TARGET_START_YEAR, TARGET_END_YEAR, MAX_SEARCHES,
     CONFIDENCE_THRESHOLD, MODEL_FAST, MODEL_STRONG,
     BUDGET_PER_COMPANY, BUDGET_GLOBAL, VERIFICATION_SKIP_THRESHOLD,
-    CONCURRENT_COMPANIES,
+    CONCURRENT_COMPANIES, REGULATORY_EMISSIONS_ENABLED,
 )
+from pipeline.regulatory_filings import (
+    find_esef_filings, fetch_esef_report_text, find_ghg_sections,
+    find_nsm_annual_reports,
+)
+import html as _html
 
 logging.basicConfig(
     level=logging.INFO,
@@ -465,14 +470,7 @@ def _extract_emissions_round(
     company, company_name, client, anthropic_key, exa_key, llama_key,
     session, covered_years, searched_urls, target_year=None, events=None,
 ):
-    """Run one search→parse→extract cycle for emissions. Returns count saved.
-
-    Tries ALL high-scoring tables in the document, accumulating unique years
-    across them (a trend table, a detailed scope table, and a Scope 3
-    breakdown may each contribute different years).
-    """
-    saved = 0
-
+    """Run one search→parse→extract cycle for emissions. Returns count saved."""
     search_result = search_for_emissions_source(
         company_name, anthropic_key, exa_key,
         target_year=target_year, exclude_urls=list(searched_urls),
@@ -482,6 +480,28 @@ def _extract_emissions_round(
     url, title, source_type, table_dicts, tables_md = _try_parse_candidates(
         candidates, searched_urls, llama_key,
     )
+    return _extract_emissions_from_document(
+        url, title, source_type, table_dicts, tables_md,
+        company, company_name, client, session, covered_years,
+        target_year=target_year, events=events,
+    )
+
+
+def _extract_emissions_from_document(
+    url, title, source_type, table_dicts, tables_md,
+    company, company_name, client, session, covered_years,
+    target_year=None, events=None,
+):
+    """Extract emissions from one parsed document and save them. Returns count saved.
+
+    source_type is 'pdf' (filtered pages sent to Claude, evidence pages
+    verified), 'html' (tables ranked, then text fallback) or 'esef'
+    (pre-ranked text sections in tables_md from a regulatory XHTML filing).
+    Tries ALL high-scoring tables/sections, accumulating unique years across
+    them (a trend table, a detailed scope table, and a Scope 3 breakdown may
+    each contribute different years).
+    """
+    saved = 0
 
     all_entries = []
     seen_years = set()
@@ -672,6 +692,56 @@ def _extract_emissions_round(
             raise
         except Exception as e:
             log.warning(f"    PDF extraction failed: {e}")
+
+    # ── ESEF path: pre-ranked text sections from a regulatory filing ────
+    if not all_entries and source_type == "esef":
+        for idx, section in enumerate(tables_md[:6]):
+            try:
+                extraction = extract_emissions_from_text(
+                    section, company_name, client, model=MODEL_FAST)
+                if not (extraction and extraction.get("emissions")):
+                    continue
+                confidence = extraction.get("confidence_score", 0) or 0
+                has_any_values = any(
+                    e.get("scope_1") is not None
+                    or e.get("scope_2_location") is not None
+                    or e.get("scope_3") is not None
+                    for e in extraction["emissions"]
+                )
+                if confidence < CONFIDENCE_THRESHOLD and not has_any_values:
+                    log.info(f"    ESEF section {idx}: low confidence ({confidence}) "
+                             "and no values, re-extracting with Opus")
+                    stronger = extract_emissions_from_text(
+                        section, company_name, client, model=MODEL_STRONG)
+                    if stronger and stronger.get("emissions"):
+                        extraction = stronger
+                        confidence = extraction.get("confidence_score", 0) or 0
+                if matched_table_idx is None:
+                    matched_table_idx = idx
+                    methodology_notes = extraction.get("methodology_notes", "")
+                best_confidence = max(best_confidence, confidence)
+                new_years = []
+                for entry in extraction["emissions"]:
+                    year = entry["reporting_year"]
+                    if year in seen_years:
+                        continue
+                    if (entry.get("scope_1") is None
+                            and entry.get("scope_2_location") is None
+                            and entry.get("scope_2_market") is None
+                            and entry.get("scope_3") is None):
+                        continue
+                    entry["_table_idx"] = idx
+                    all_entries.append(entry)
+                    seen_years.add(year)
+                    new_years.append(year)
+                    if year == target_year:
+                        target_year_table_idx = idx
+                log.info(f"    ESEF section {idx}: conf={confidence} "
+                         f"years={sorted(new_years)}")
+            except BudgetExceeded:
+                raise
+            except Exception as e:
+                log.warning(f"    ESEF section {idx} extraction failed: {e}")
 
     # ── HTML path: table ranking + text fallback ───────────────────────
     if not all_entries and source_type == "html":
@@ -881,6 +951,118 @@ def _extract_emissions_round(
                         "years": {yr},
                     })
             events.append(source_evt)
+
+    return saved
+
+
+def _run_regulatory_emissions_tier(
+    company, company_name, client, session, covered_years, target, events=None,
+):
+    """Tier 0: emissions from regulatory annual-report filings, by LEI.
+
+    ESEF XHTML reports (filings.xbrl.org, EU+UK) first, newest report first —
+    each usually carries the prior year as a comparative, so a report for FY
+    y is fetched only if y or y-1 is still missing. Then UK NSM PDFs for any
+    remaining years that predate ESEF. Returns count saved.
+    """
+    if not company.lei:
+        log.info("  Tier 0 regulatory: no LEI on record, skipping")
+        return 0
+    missing = target - covered_years
+    if not missing:
+        return 0
+
+    saved = 0
+    safe_name = company_name.lower().replace(" ", "_").replace("&", "and")
+    debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug")
+    os.makedirs(debug_dir, exist_ok=True)
+
+    # ── ESEF (filings.xbrl.org) ─────────────────────────────────────────
+    try:
+        filings = find_esef_filings(company.lei)
+    except Exception as e:
+        log.warning(f"  Tier 0 ESEF: lookup failed: {e}")
+        filings = []
+    if filings:
+        log.info(f"  Tier 0 ESEF: {len(filings)} filing(s) for LEI {company.lei}: "
+                 f"{[f['year'] for f in filings]}")
+    else:
+        log.info(f"  Tier 0 ESEF: no filings for LEI {company.lei}")
+
+    for f in filings:
+        year = f["year"]
+        if year < TARGET_START_YEAR:
+            break
+        if year not in missing and (year - 1) not in missing:
+            continue
+        try:
+            log.info(f"  Tier 0 ESEF: FY{year} report ({f['country']}) "
+                     f"{f['report_url']}")
+            text = fetch_esef_report_text(f["report_url"])
+            sections = find_ghg_sections(text)
+            log.info(f"    {len(text):,} chars of text, "
+                     f"{len(sections)} GHG section(s)")
+            if not sections:
+                continue
+            with open(os.path.join(debug_dir, f"{safe_name}_esef_{year}_sections.txt"),
+                      "w", encoding="utf-8") as _sf:
+                _sf.write("\n\n==== SECTION ====\n\n".join(sections))
+            table_dicts = [{
+                "markdown": s,
+                "html_snippet": "<pre style='white-space:pre-wrap'>"
+                                + _html.escape(s[:4000]) + "</pre>",
+            } for s in sections]
+            n = _extract_emissions_from_document(
+                f["report_url"],
+                f"{company_name} Annual Report FY{year} (ESEF filing, {f['country']})",
+                "esef", table_dicts, list(sections),
+                company, company_name, client, session, covered_years,
+                target_year=year, events=events,
+            )
+            saved += n
+            log.info(f"  Tier 0 ESEF: FY{year}: saved {n} record(s)")
+        except BudgetExceeded:
+            raise
+        except Exception as e:
+            log.warning(f"  Tier 0 ESEF: FY{year} failed: {e}")
+            session.rollback()
+        missing = target - covered_years
+        if not missing:
+            break
+
+    # ── UK NSM PDFs for years still missing (pre-ESEF) ──────────────────
+    if missing:
+        try:
+            reports = [r for r in find_nsm_annual_reports(company.lei) if r["format"] == "pdf"]
+        except Exception as e:
+            log.warning(f"  Tier 0 NSM: lookup failed: {e}")
+            reports = []
+        if reports:
+            log.info(f"  Tier 0 NSM: {len(reports)} PDF annual report(s): "
+                     f"{[r['year'] for r in reports]}")
+        for r in reports:
+            year = r["year"]
+            if year < TARGET_START_YEAR:
+                break
+            if year not in missing and (year - 1) not in missing:
+                continue
+            try:
+                log.info(f"  Tier 0 NSM: FY{year} '{r['title']}' {r['url']}")
+                n = _extract_emissions_from_document(
+                    r["url"], f"{r['title']} (FCA NSM filing)", "pdf", [], [],
+                    company, company_name, client, session, covered_years,
+                    target_year=year, events=events,
+                )
+                saved += n
+                log.info(f"  Tier 0 NSM: FY{year}: saved {n} record(s)")
+            except BudgetExceeded:
+                raise
+            except Exception as e:
+                log.warning(f"  Tier 0 NSM: FY{year} failed: {e}")
+                session.rollback()
+            missing = target - covered_years
+            if not missing:
+                break
 
     return saved
 
@@ -1740,6 +1922,23 @@ def process_company(
     if em_missing and not skip_emissions:
         log.info(f"  Emissions: have {sorted(em_pre_existing) or 'none'}, "
                  f"missing {sorted(em_missing)}")
+
+        if REGULATORY_EMISSIONS_ENABLED:
+            try:
+                reg_saved = _run_regulatory_emissions_tier(
+                    company, company_name, client, session, em_covered, target,
+                    events=events,
+                )
+                total_em_saved += reg_saved
+                em_missing = target - em_covered
+                if reg_saved:
+                    log.info(f"  Tier 0 regulatory: saved {reg_saved} record(s); "
+                             f"still missing {sorted(em_missing) or 'nothing'}")
+            except BudgetExceeded:
+                raise
+            except Exception as e:
+                log.warning(f"  Tier 0 regulatory failed: {e}")
+                session.rollback()
 
         search_count = 0
         consecutive_empty = 0

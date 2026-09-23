@@ -28,3 +28,7 @@ VERIFICATION_SKIP_THRESHOLD = 5
 
 # Max companies to process concurrently (1 = sequential)
 CONCURRENT_COMPANIES = 4
+
+# Tier 0 emissions: try regulatory annual-report filings (ESEF via
+# filings.xbrl.org, UK NSM PDFs) by LEI before any web search.
+REGULATORY_EMISSIONS_ENABLED = True
