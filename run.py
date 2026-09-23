@@ -173,7 +173,7 @@ def cmd_init(args):
         lei_result = None
         if not args.skip_lei:
             try:
-                lei_result = lookup_lei(entry["name"])
+                lei_result = lookup_lei(entry["name"], entry.get("ticker"))
                 if lei_result:
                     flag = f" ⚑ {lei_result['flag_reason']}" if lei_result.get("flag_reason") else ""
                     print(f"  {entry['name']} -> LEI: {lei_result['lei']} "
@@ -211,7 +211,7 @@ def cmd_init(args):
             print(f"\nBackfilling LEIs for {len(no_lei)} companies...")
             for company in no_lei:
                 try:
-                    result = lookup_lei(company.name)
+                    result = lookup_lei(company.name, company.ticker)
                     if result:
                         company.lei = result["lei"]
                         company.lei_legal_name = result["legal_name"]
@@ -292,6 +292,63 @@ def cmd_extract(args):
     print(f"  Skipped:    {run['skipped']}")
     if run.get("budget_paused"):
         print(f"  Budget paused: {run['budget_paused']}")
+
+
+def cmd_lei(args):
+    """Re-resolve LEIs (ISIN-first) and report every change.
+
+    A wrong LEI silently disables every regulatory data source, and the old
+    name-only lookup matched pension schemes, share plans and subsidiaries
+    for about one company in ten.
+    """
+    config = get_config()
+    from db.models import get_session, Company
+    from pipeline.lei_lookup import lookup_lei
+
+    session = get_session(config["DATABASE_URL"])
+    if args.id:
+        companies = [session.get(Company, args.id)]
+    else:
+        companies = session.query(Company).order_by(Company.id).all()
+
+    changed = unchanged = failed = 0
+    for company in companies:
+        if company is None:
+            continue
+        try:
+            result = lookup_lei(company.name, company.ticker)
+        except Exception as e:
+            failed += 1
+            print(f"  {company.id:3d} {company.name}: lookup failed: {e}")
+            continue
+        if not result:
+            failed += 1
+            print(f"  {company.id:3d} {company.name}: no plausible LEI")
+            continue
+
+        method = result.get("method", "name")
+        if result["lei"] == company.lei:
+            unchanged += 1
+            if args.verbose:
+                print(f"  {company.id:3d} {company.name}: unchanged {company.lei} "
+                      f"({result['legal_name']}) via {method}")
+            continue
+
+        changed += 1
+        print(f"  {company.id:3d} {company.name}: {company.lei} ({company.lei_legal_name}) "
+              f"-> {result['lei']} ({result['legal_name']}) via {method}")
+        if not args.dry_run:
+            company.lei = result["lei"]
+            company.lei_legal_name = result["legal_name"]
+            company.lei_country = result["country"]
+            company.lei_confidence = result["confidence"]
+            company.lei_flag_reason = result.get("flag_reason")
+            company.lei_review_status = "approved" if result["confidence"] == "high" else "pending"
+
+    if not args.dry_run:
+        session.commit()
+    print(f"\nLEI refresh: {changed} changed, {unchanged} unchanged, {failed} unresolved"
+          + (" (dry run — nothing written)" if args.dry_run else ""))
 
 
 def cmd_check(args):
@@ -473,6 +530,12 @@ def main():
     extract_parser.add_argument("--concurrent", type=int, default=4,
                                 help="Max companies to process concurrently (default: 4)")
 
+    # lei
+    lei_parser = subparsers.add_parser("lei", help="Re-resolve LEIs (ISIN-first) and report changes")
+    lei_parser.add_argument("--id", type=int, help="Refresh a single company by ID")
+    lei_parser.add_argument("--dry-run", action="store_true", help="Report changes without writing")
+    lei_parser.add_argument("--verbose", action="store_true", help="Also list unchanged companies")
+
     # check
     subparsers.add_parser("check", help="Run sanity checks")
 
@@ -498,6 +561,7 @@ def main():
     commands = {
         "init": cmd_init,
         "extract": cmd_extract,
+        "lei": cmd_lei,
         "check": cmd_check,
         "status": cmd_status,
         "reset": cmd_reset,
