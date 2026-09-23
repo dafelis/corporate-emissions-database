@@ -726,20 +726,9 @@ def _extract_emissions_from_document(
                 if not (extraction and extraction.get("emissions")):
                     continue
                 confidence = extraction.get("confidence_score", 0) or 0
-                has_any_values = any(
-                    e.get("scope_1") is not None
-                    or e.get("scope_2_location") is not None
-                    or e.get("scope_3") is not None
-                    for e in extraction["emissions"]
-                )
-                if confidence < CONFIDENCE_THRESHOLD and not has_any_values:
-                    log.info(f"    ESEF section {idx}: low confidence ({confidence}) "
-                             "and no values, re-extracting with Opus")
-                    stronger = extract_emissions_from_text(
-                        section, company_name, client, model=MODEL_STRONG)
-                    if stronger and stronger.get("emissions"):
-                        extraction = stronger
-                        confidence = extraction.get("confidence_score", 0) or 0
+                # No Opus escalation here: sections are pre-ranked and the
+                # GHG table always scores high, so a low-confidence window
+                # with no numbers is a passing mention, not a hard read.
                 if confidence < ESEF_SECTION_MIN_CONFIDENCE:
                     log.info(f"    ESEF section {idx}: conf={confidence} < "
                              f"{ESEF_SECTION_MIN_CONFIDENCE}, ignored")
