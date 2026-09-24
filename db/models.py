@@ -38,6 +38,13 @@ class Company(Base):
     nace_description = Column(String(500))
     industry_review_status = Column(String(20), default="pending")
 
+    # PCAF: banks, insurers and asset managers need FI treatment rather than
+    # EVIC. Held per company, not per record — it is a fact about the business,
+    # and deciding it per record made the answer depend on which tier happened
+    # to supply a given year.
+    is_financial_institution = Column(Boolean)
+    fi_basis = Column(String(200))            # why it was decided that way
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
     emissions = relationship("EmissionsRecord", back_populates="company")

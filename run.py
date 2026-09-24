@@ -84,6 +84,8 @@ _MIGRATIONS = [
     ("companies", "nace_code", "VARCHAR(20)"),
     ("companies", "nace_description", "VARCHAR(500)"),
     ("companies", "industry_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+    ("companies", "is_financial_institution", "BOOLEAN"),
+    ("companies", "fi_basis", "VARCHAR(200)"),
     # Emissions table — reporting period
     ("emissions_records", "period_start", "DATE"),
     ("emissions_records", "period_end", "DATE"),
@@ -292,6 +294,61 @@ def cmd_extract(args):
     print(f"  Skipped:    {run['skipped']}")
     if run.get("budget_paused"):
         print(f"  Budget paused: {run['budget_paused']}")
+
+
+def cmd_fi(args):
+    """Settle PCAF financial-institution status per company and recompute EVIC.
+
+    FI status used to be decided per record by whichever tier supplied that
+    year — Tier 1/2 hardcode False, Tier 3 asks the model — so a bank could
+    have EVIC for some years and not others. Decide once per company from its
+    industry classification and apply it to every year.
+    """
+    config = get_config()
+    from db.models import get_session, Company, FinancialRecord
+    from pipeline.financial_validator import determine_fi_status, compute_evic
+
+    session = get_session(config["DATABASE_URL"])
+    if args.id:
+        companies = [session.get(Company, args.id)]
+    else:
+        companies = session.query(Company).order_by(Company.id).all()
+
+    n_fi = withdrawn = added = 0
+    for company in companies:
+        if company is None:
+            continue
+        records = session.query(FinancialRecord).filter_by(company_id=company.id).all()
+        if args.set is not None and args.id:
+            is_fi, basis = (args.set == "yes"), "set manually"
+        else:
+            is_fi, basis = determine_fi_status(company, records)
+
+        company.is_financial_institution = is_fi
+        company.fi_basis = basis
+        if is_fi:
+            n_fi += 1
+
+        changes = []
+        for r in records:
+            before = r.evic
+            compute_evic(r, company)
+            r.is_financial_institution = is_fi   # keep the record in step
+            if before is not None and r.evic is None:
+                withdrawn += 1
+                changes.append(f"{r.reporting_year} withdrawn")
+            elif before is None and r.evic is not None:
+                added += 1
+                changes.append(f"{r.reporting_year} added")
+        if is_fi or changes:
+            note = f" — EVIC {', '.join(changes)}" if changes else ""
+            print(f"  {company.id:3d} {company.name:32s} FI={is_fi}  [{basis}]{note}")
+
+    if not args.dry_run:
+        session.commit()
+    print(f"\n{n_fi} of {len(companies)} companies are PCAF financial institutions; "
+          f"EVIC withdrawn from {withdrawn} record(s), added to {added}"
+          + (" (dry run — nothing written)" if args.dry_run else ""))
 
 
 def cmd_tickers(args):
@@ -611,6 +668,14 @@ def main():
     lei_parser.add_argument("--dry-run", action="store_true", help="Report changes without writing")
     lei_parser.add_argument("--verbose", action="store_true", help="Also list unchanged companies")
 
+    # fi
+    fi_parser = subparsers.add_parser(
+        "fi", help="Settle PCAF financial-institution status per company, recompute EVIC")
+    fi_parser.add_argument("--id", type=int, help="A single company by ID")
+    fi_parser.add_argument("--set", choices=["yes", "no"],
+                           help="With --id: set FI status manually")
+    fi_parser.add_argument("--dry-run", action="store_true", help="Report without writing")
+
     # tickers
     tick_parser = subparsers.add_parser(
         "tickers", help="Verify tickers still return prices; sync from data/ftse100.py")
@@ -643,6 +708,7 @@ def main():
         "extract": cmd_extract,
         "lei": cmd_lei,
         "tickers": cmd_tickers,
+        "fi": cmd_fi,
         "check": cmd_check,
         "status": cmd_status,
         "reset": cmd_reset,

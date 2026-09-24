@@ -76,18 +76,69 @@ def validate_financial_entry(entry, reporting_year=None):
     return flags
 
 
-def compute_evic(record):
+# PCAF FI treatment covers banks, insurers and asset managers, whose
+# liabilities are customer money rather than financing. SIC 6500-6599 (real
+# estate) is deliberately excluded; NAICS 52 is Finance and Insurance.
+_FI_SIC_RANGES = ((6000, 6499), (6700, 6799))
+_FI_NAICS_PREFIX = "52"
+_FI_SECTORS = {"financial services", "financials"}
+
+
+def determine_fi_status(company, records=()) -> tuple[bool, str]:
+    """Decide PCAF FI status for a company. Returns (is_fi, basis).
+
+    Uses the industry classification first, because that is a property of the
+    business, and falls back to what document extraction reported. Exchanges
+    and market-data businesses classify under NAICS 52 too, so the result is
+    a prompt for review rather than a final answer.
+    """
+    naics = (company.naics_code or "").strip()
+    if naics.startswith(_FI_NAICS_PREFIX):
+        return True, f"NAICS {naics} (Finance and Insurance)"
+
+    sic = (company.sic_code or "").strip()
+    if sic.isdigit():
+        code = int(sic)
+        for lo, hi in _FI_SIC_RANGES:
+            if lo <= code <= hi:
+                return True, f"SIC {sic}"
+
+    sector = (company.yfinance_sector or "").strip().lower()
+    if sector in _FI_SECTORS:
+        return True, f"sector '{company.yfinance_sector}'"
+
+    # A classification that says non-financial is trusted over what the model
+    # read in a document: extraction flagged Barclays FI in some years and not
+    # others, which is the inconsistency this function exists to remove.
+    if naics or sic or sector:
+        return False, "industry classification is non-financial"
+
+    votes = [r.is_financial_institution for r in records
+             if r.is_financial_institution is not None]
+    if votes and sum(bool(v) for v in votes) > len(votes) / 2:
+        return True, f"document extraction ({sum(bool(v) for v in votes)}/{len(votes)} years)"
+    return False, "no classification available"
+
+
+def compute_evic(record, company=None):
     """Compute EVIC from a FinancialRecord (DB model instance).
 
     PCAF definition: EVIC = market_cap + total_debt (book value) + NCI
     Cash is NOT subtracted. Preference shares stored but not in EVIC.
+
+    `company` supplies the authoritative FI status; without it the record's
+    own flag is used, which varies by source tier.
 
     Returns the EVIC value or None if required inputs are missing.
     Sets record.evic and record.validation_flags.
     """
     flags = json.loads(record.validation_flags) if record.validation_flags else []
 
-    if record.is_financial_institution:
+    is_fi = record.is_financial_institution
+    if company is not None and company.is_financial_institution is not None:
+        is_fi = company.is_financial_institution
+
+    if is_fi:
         record.evic = None
         if "FI — PCAF FI treatment required" not in flags:
             flags.append("FI — PCAF FI treatment required")

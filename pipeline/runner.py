@@ -33,7 +33,9 @@ from pipeline.extractor import (
     extract_emissions_from_pdf, verify_page_contains_values,
 )
 from pipeline.financial_extractor import find_financial_tables, extract_financials, normalise_to_units
-from pipeline.financial_validator import validate_financial_entry, compute_evic
+from pipeline.financial_validator import (
+    validate_financial_entry, compute_evic, determine_fi_status,
+)
 from pipeline.tier1_xbrl import extract_financials_from_xbrl
 from pipeline.tier1_edgar import extract_financials_from_edgar
 from pipeline.tier2_yfinance import extract_financials_from_yfinance
@@ -2271,6 +2273,17 @@ def process_company(
 
     # ── PART 3: Market data from yfinance ─────────────────────────────────
 
+    if not skip_financial:
+        # Settle FI status before any EVIC is computed, so every year of a
+        # company is treated the same way.
+        all_fin = session.query(FinancialRecord).filter_by(company_id=company.id).all()
+        is_fi, basis = determine_fi_status(company, all_fin)
+        if company.is_financial_institution != is_fi or company.fi_basis != basis:
+            company.is_financial_institution = is_fi
+            company.fi_basis = basis
+            session.commit()
+            log.info(f"  PCAF FI status: {is_fi} ({basis})")
+
     if company.ticker and not skip_financial:
         fin_records = (
             session.query(FinancialRecord)
@@ -2361,7 +2374,7 @@ def process_company(
                             fr.equity_value + fr.outstanding_debt - fr.cash_and_equivalents
                         )
                     # PCAF EVIC
-                    evic = compute_evic(fr)
+                    evic = compute_evic(fr, company)
                     evic_str = f", EVIC={evic:,.0f}" if evic else ""
                     log.info(f"    {fr.reporting_year}: equity={market_cap:,.0f} "
                              f"{currency} (price={price:.2f} × shares={shares:,} "
