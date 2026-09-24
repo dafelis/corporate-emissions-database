@@ -308,9 +308,14 @@ def cmd_tickers(args):
     from data.ftse100 import FTSE_100
     import yfinance as yf
 
+    import datetime as _dt
     session = get_session(config["DATABASE_URL"])
     listed = {e["name"]: e.get("ticker") for e in FTSE_100}
     synced = dead = ok = 0
+    # A recent window: a newly listed line (e.g. SUNB.L from Mar 2026) has no
+    # history before it existed, and a dead line has none now.
+    _end = _dt.date.today()
+    _start = _end - _dt.timedelta(days=30)
 
     for company in session.query(Company).order_by(Company.id).all():
         want = listed.get(company.name)
@@ -327,7 +332,7 @@ def cmd_tickers(args):
             continue
         try:
             hist = yf.Ticker(company.ticker).history(
-                start="2025-06-01", end="2025-06-10", auto_adjust=False)
+                start=_start.isoformat(), end=_end.isoformat(), auto_adjust=False)
         except Exception:
             hist = []
         if len(hist):
