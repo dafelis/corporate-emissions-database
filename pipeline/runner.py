@@ -2292,6 +2292,11 @@ def process_company(
                 session.flush()
 
                 for fr in fin_records:
+                  # Per-record guard: one bad record must not cost the whole
+                  # company its market data (a single record whose
+                  # extraction_notes held a JSON list, not an object, was
+                  # aborting the loop and leaving every year without equity).
+                  try:
                     target_date = fr.fiscal_year_end or date_type(fr.reporting_year, 12, 31)
                     price_data = get_share_price_at_date(company.ticker, target_date)
                     if not price_data:
@@ -2323,7 +2328,11 @@ def process_company(
                         notes_data = json.loads(fr.extraction_notes) if fr.extraction_notes else {}
                     except (json.JSONDecodeError, TypeError):
                         notes_data = {}
+                    if not isinstance(notes_data, dict):
+                        notes_data = {}
                     prov = notes_data.get("provenance", {})
+                    if not isinstance(prov, dict):
+                        prov = {}
                     prov["equity_value"] = {
                         "concept": "market_cap",
                         "value": market_cap,
@@ -2338,7 +2347,8 @@ def process_company(
                             {"concept": "Share price", "value": price,
                              "period": str(price_date), "calculated": False},
                             {"concept": "Shares outstanding", "value": shares,
-                             "period": prov.get("shares_outstanding", {}).get("period", ""),
+                             "period": (prov.get("shares_outstanding") or {}).get("period", "")
+                                       if isinstance(prov.get("shares_outstanding"), dict) else "",
                              "calculated": False, "source": shares_source},
                         ],
                     }
@@ -2356,6 +2366,10 @@ def process_company(
                     log.info(f"    {fr.reporting_year}: equity={market_cap:,.0f} "
                              f"{currency} (price={price:.2f} × shares={shares:,} "
                              f"[{shares_source}]){evic_str}")
+                  except BudgetExceeded:
+                    raise
+                  except Exception as e:
+                    log.warning(f"    {fr.reporting_year}: market data failed: {e}")
                 session.commit()
             except BudgetExceeded:
                 raise
