@@ -10,13 +10,16 @@ FTSE_100 = [
     {"name": "Airtel Africa", "ticker": "AAF.L"},
     {"name": "Anglo American", "ticker": "AAL.L"},
     {"name": "Antofagasta", "ticker": "ANTO.L"},
-    {"name": "Ashtead Group", "ticker": "AHT.L"},
+    # Redomiciled to the US as Sunbelt Rentals Holdings, 2 Mar 2026; AHT.L
+    # cancelled. SUNB.L is the LSE secondary listing, so prices stay in GBp.
+    {"name": "Ashtead Group", "ticker": "SUNB.L"},
     {"name": "AstraZeneca", "ticker": "AZN.L"},
     {"name": "Auto Trader Group", "ticker": "AUTO.L"},
     {"name": "Aviva", "ticker": "AV.L"},
     {"name": "BAE Systems", "ticker": "BA.L"},
     {"name": "Barclays", "ticker": "BARC.L"},
-    {"name": "Barratt Developments", "ticker": "BDEV.L"},
+    # Merged with Redrow 2024 and renamed Barratt Redrow plc; BDEV.L retired.
+    {"name": "Barratt Developments", "ticker": "BTRW.L"},
     {"name": "Berkeley Group", "ticker": "BKG.L"},
     {"name": "BP", "ticker": "BP.L"},
     {"name": "British American Tobacco", "ticker": "BATS.L"},
@@ -33,7 +36,8 @@ FTSE_100 = [
     {"name": "Endeavour Mining", "ticker": "EDV.L"},
     {"name": "Entain", "ticker": "ENT.L"},
     {"name": "Experian", "ticker": "EXPN.L"},
-    {"name": "Flutter Entertainment", "ticker": "FLTR.L"},
+    # Primary listing moved to the NYSE; the LSE line has gone. Prices are USD.
+    {"name": "Flutter Entertainment", "ticker": "FLUT"},
     {"name": "Fresnillo", "ticker": "FRES.L"},
     {"name": "Glencore", "ticker": "GLEN.L"},
     {"name": "GSK", "ticker": "GSK.L"},
@@ -66,7 +70,8 @@ FTSE_100 = [
     {"name": "Pearson", "ticker": "PSON.L"},
     {"name": "Pershing Square Holdings", "ticker": "PSH.L"},
     {"name": "Persimmon", "ticker": "PSN.L"},
-    {"name": "Phoenix Group Holdings", "ticker": "PHNX.L"},
+    # Renamed Standard Life plc, Mar 2026; PHNX.L retired.
+    {"name": "Phoenix Group Holdings", "ticker": "SDLF.L"},
     {"name": "Prudential", "ticker": "PRU.L"},
     {"name": "Reckitt Benckiser Group", "ticker": "RKT.L"},
     {"name": "RELX", "ticker": "REL.L"},

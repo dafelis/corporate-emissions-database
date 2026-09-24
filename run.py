@@ -294,6 +294,54 @@ def cmd_extract(args):
         print(f"  Budget paused: {run['budget_paused']}")
 
 
+def cmd_tickers(args):
+    """Check every stored ticker still returns prices, and sync from the list.
+
+    Tickers die on renames, mergers and listing moves — the same corporate
+    actions that break LEIs. A dead ticker silently costs equity_value and
+    therefore EVIC for every year of that company.
+    """
+    config = get_config()
+    import warnings
+    warnings.filterwarnings("ignore")
+    from db.models import get_session, Company
+    from data.ftse100 import FTSE_100
+    import yfinance as yf
+
+    session = get_session(config["DATABASE_URL"])
+    listed = {e["name"]: e.get("ticker") for e in FTSE_100}
+    synced = dead = ok = 0
+
+    for company in session.query(Company).order_by(Company.id).all():
+        want = listed.get(company.name)
+        if want and want != company.ticker:
+            print(f"  {company.id:3d} {company.name}: ticker {company.ticker} -> {want} (from list)")
+            synced += 1
+            if not args.dry_run:
+                company.ticker = want
+            company.ticker = want  # check the new one below either way
+
+        if not company.ticker:
+            print(f"  {company.id:3d} {company.name}: no ticker")
+            dead += 1
+            continue
+        try:
+            hist = yf.Ticker(company.ticker).history(
+                start="2025-06-01", end="2025-06-10", auto_adjust=False)
+        except Exception:
+            hist = []
+        if len(hist):
+            ok += 1
+        else:
+            dead += 1
+            print(f"  {company.id:3d} {company.name}: NO PRICE DATA for {company.ticker}")
+
+    if not args.dry_run:
+        session.commit()
+    print(f"\nTickers: {ok} live, {dead} dead, {synced} synced from data/ftse100.py"
+          + (" (dry run — nothing written)" if args.dry_run else ""))
+
+
 def cmd_lei(args):
     """Re-resolve LEIs (ISIN-first) and report every change.
 
@@ -558,6 +606,11 @@ def main():
     lei_parser.add_argument("--dry-run", action="store_true", help="Report changes without writing")
     lei_parser.add_argument("--verbose", action="store_true", help="Also list unchanged companies")
 
+    # tickers
+    tick_parser = subparsers.add_parser(
+        "tickers", help="Verify tickers still return prices; sync from data/ftse100.py")
+    tick_parser.add_argument("--dry-run", action="store_true", help="Report without writing")
+
     # check
     subparsers.add_parser("check", help="Run sanity checks")
 
@@ -584,6 +637,7 @@ def main():
         "init": cmd_init,
         "extract": cmd_extract,
         "lei": cmd_lei,
+        "tickers": cmd_tickers,
         "check": cmd_check,
         "status": cmd_status,
         "reset": cmd_reset,
