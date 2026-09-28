@@ -26,6 +26,7 @@ clients). Those need a different approach, not a different parser.
 """
 
 import argparse
+import collections
 import csv
 import http.cookiejar
 import io
@@ -113,6 +114,58 @@ def _browser_session_get(page_url: str, data_url: str, timeout: int = 120) -> by
 
 def _localname(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
+
+
+def _col_index(ref: str) -> int:
+    """'C7' -> 2. Spreadsheet column letters to a 0-based index."""
+    letters = "".join(ch for ch in ref if ch.isalpha())
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
+def _xlsx_rows(data: bytes, sheet: int = 1):
+    """Yield rows of an .xlsx as lists of strings, using only the stdlib.
+
+    An xlsx is a zip of XML, so openpyxl is not needed for a flat sheet.
+    Cells are placed by their column reference rather than in document
+    order, because blank cells are simply omitted from the XML.
+    """
+    z = zipfile.ZipFile(io.BytesIO(data))
+    shared: list[str] = []
+    if "xl/sharedStrings.xml" in z.namelist():
+        root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+        for si in root:
+            shared.append("".join(t.text or "" for t in si.iter()
+                                  if _localname(t.tag) == "t"))
+    name = f"xl/worksheets/sheet{sheet}.xml"
+    if name not in z.namelist():
+        return
+    root = ET.fromstring(z.read(name))
+    for row in root.iter():
+        if _localname(row.tag) != "row":
+            continue
+        cells: list[str] = []
+        for c in row:
+            if _localname(c.tag) != "c":
+                continue
+            value = ""
+            for child in c:
+                tag = _localname(child.tag)
+                if tag == "v":
+                    value = child.text or ""
+                elif tag == "is":
+                    value = "".join(t.text or "" for t in child.iter()
+                                    if _localname(t.tag) == "t")
+            if c.get("t") == "s" and value.isdigit():
+                value = shared[int(value)]
+            i = _col_index(c.get("r", "")) if c.get("r") else len(cells)
+            while len(cells) <= i:
+                cells.append("")
+            cells[i] = value
+        if any(cells):
+            yield cells
 
 
 # ── ESMA FIRDS ────────────────────────────────────────────────────────────
@@ -305,22 +358,169 @@ def build_asx(out_dir: str) -> str:
     return path
 
 
-def build_sec(out_dir: str) -> str:
-    print("SEC US (CIK, no ISIN — CUSIP is licensed)")
-    data = json.loads(_get("https://www.sec.gov/files/company_tickers.json"))
-    rows = []
-    for entry in data.values():
+US_EXCHANGE_MIC = {"Nasdaq": ("XNAS", "Nasdaq"), "NYSE": ("XNYS", "New York Stock Exchange"),
+                   "CBOE": ("BATS", "Cboe BZX")}
+
+
+def build_sec(out_dir: str, keep_otc: bool = False) -> str:
+    """US listings from the SEC's exchange-tagged ticker file.
+
+    company_tickers_exchange.json carries the exchange, so OTC can be
+    dropped — company_tickers.json cannot distinguish it. No ISIN: US ISINs
+    derive from CUSIP, which is licensed. CIK is EDGAR's key regardless.
+    """
+    print("SEC US (CIK; no ISIN — CUSIP is licensed)")
+    data = json.loads(_get("https://www.sec.gov/files/company_tickers_exchange.json"))
+    fields = data["fields"]
+    idx = {name: fields.index(name) for name in ("cik", "name", "ticker", "exchange")}
+    rows, skipped = [], collections.Counter()
+    for entry in data["data"]:
+        exch = entry[idx["exchange"]]
+        if exch not in US_EXCHANGE_MIC and not keep_otc:
+            skipped[exch or "(none)"] += 1
+            continue
+        mic, label = US_EXCHANGE_MIC.get(exch, ("", exch or ""))
         rows.append({
-            "country": "US", "exchange": "US (Nasdaq/NYSE/other)", "mic": "",
-            "name": entry.get("title", ""), "isin": "", "lei": "",
-            "local_code": str(entry.get("cik_str", "")).zfill(10),
-            "ticker": entry.get("ticker", ""), "currency": "USD",
-            "cfi": "", "source": "SEC company_tickers.json",
+            "country": "US", "exchange": label, "mic": mic,
+            "name": entry[idx["name"]], "isin": "", "isin_country": "",
+            "lei": "", "local_code": str(entry[idx["cik"]]).zfill(10),
+            "ticker": entry[idx["ticker"]], "currency": "USD", "cfi": "",
+            "source": "SEC company_tickers_exchange.json",
         })
     path = os.path.join(out_dir, "universe_sec.csv")
     _write(path, rows)
-    print(f"  {len(rows):,} filers with tickers "
-          "(includes funds/ETFs/OTC — filter before use)")
+    print(f"  {len(rows):,} exchange-listed; skipped {dict(skipped)}")
+    print("  NB still includes ETFs and closed-end funds listed on those "
+          "exchanges — filter on SIC 6726 via EDGAR if that matters")
+    return path
+
+
+def build_six(out_dir: str) -> str:
+    """SIX Swiss equity issuers — publishes ISIN and a primary-listing flag."""
+    print("SIX Swiss Exchange")
+    text = _get("https://www.six-group.com/sheldon/equity_issuers/v1/equity_issuers.csv",
+                headers=BROWSER).decode("utf-8-sig", "replace")
+    rows = []
+    for r in csv.DictReader(io.StringIO(text), delimiter=";"):
+        isin = (r.get("ISIN") or "").strip()
+        rows.append({
+            "country": (r.get("Country") or "").strip() or "CH",
+            "exchange": "SIX Swiss Exchange",
+            "mic": (r.get("Trading platform") or "XSWX").strip(),
+            "name": (r.get("Company") or "").strip(), "isin": isin,
+            "isin_country": isin[:2], "lei": "",
+            "local_code": (r.get("Symbol") or "").strip(),
+            "ticker": f"{(r.get('Symbol') or '').strip()}.SW",
+            "currency": (r.get("Traded Currency") or "").strip(), "cfi": "",
+            "source": "SIX equity_issuers.csv"
+                      + (" [primary]" if (r.get("Primary listing") or "").upper() == "TRUE" else ""),
+        })
+    path = os.path.join(out_dir, "universe_six.csv")
+    _write(path, rows)
+    primary = sum(1 for r in rows if "[primary]" in r["source"])
+    print(f"  {len(rows):,} issuers ({primary:,} with SIX as primary listing; "
+          "the rest are foreign lines)")
+    return path
+
+
+def build_tsx(out_dir: str) -> str:
+    """Toronto Stock Exchange company directory. No ISIN published."""
+    print("Toronto Stock Exchange (no ISIN published)")
+    data = json.loads(_get("https://www.tsx.com/json/company-directory/search/tsx/%5E*",
+                           headers=BROWSER))
+    rows = []
+    for r in data.get("results", []):
+        symbol = (r.get("symbol") or "").strip()
+        rows.append({
+            "country": "CA", "exchange": "Toronto Stock Exchange", "mic": "XTSE",
+            "name": (r.get("name") or "").strip(), "isin": "", "isin_country": "",
+            # Yahoo writes Canadian class/unit suffixes with a hyphen:
+            # TSX "IGBT.UN" is "IGBT-UN.TO", not "IGBT.UN.TO".
+            "lei": "", "local_code": symbol,
+            "ticker": f"{symbol.replace('.', '-')}.TO" if symbol else "",
+            "currency": "CAD", "cfi": "", "source": "tsx.com company-directory",
+        })
+    path = os.path.join(out_dir, "universe_tsx.csv")
+    _write(path, rows); print(f"  {len(rows):,} listings (includes trusts and ETFs)")
+    return path
+
+
+def build_hkex(out_dir: str) -> str:
+    """HKEX List of Securities. Equities only; the file covers every product."""
+    print("Hong Kong HKEX")
+    data = _get("https://www.hkex.com.hk/eng/services/trading/securities/"
+                "securitieslists/ListOfSecurities.xlsx", headers=BROWSER)
+    rows, header, hdr_idx = [], None, {}
+    for cells in _xlsx_rows(data):
+        joined = [c.strip() for c in cells]
+        if header is None:
+            if any(c.lower().startswith("stock code") for c in joined):
+                header = joined
+                hdr_idx = {c.lower(): i for i, c in enumerate(header)}
+            continue
+        def cell(*names):
+            for n in names:
+                for key, i in hdr_idx.items():
+                    if key.startswith(n) and i < len(joined):
+                        return joined[i]
+            return ""
+        code = cell("stock code")
+        name = cell("name of securities", "stock short name")
+        category = cell("category", "classification")
+        if not code or not code.isdigit():
+            continue
+        if category and "equity" not in category.lower():
+            continue
+        rows.append({
+            "country": "HK", "exchange": "Hong Kong Stock Exchange", "mic": "XHKG",
+            "name": name, "isin": "", "isin_country": "", "lei": "",
+            # HKEX pads to 5 digits; Yahoo uses 4 (00700 -> 0700.HK).
+            "local_code": code.zfill(5), "ticker": f"{int(code):04d}.HK",
+            "currency": "HKD", "cfi": "", "source": "HKEX ListOfSecurities.xlsx",
+        })
+    path = os.path.join(out_dir, "universe_hkex.csv")
+    _write(path, rows); print(f"  {len(rows):,} equity listings")
+    return path
+
+
+def build_b3(out_dir: str, page_size: int = 20) -> str:
+    """B3 Brazil listed companies. Paginated; keyed on CNPJ and CVM code."""
+    print("B3 Brazil")
+    import base64
+    import time
+    base = ("https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/"
+            "CompanyCall/GetInitialCompanies/")
+    rows, page, total_pages = [], 1, None
+    while True:
+        token = base64.b64encode(json.dumps(
+            {"language": "pt-br", "pageNumber": page, "pageSize": page_size}
+        ).encode()).decode()
+        payload = json.loads(_get(base + token, headers=BROWSER, timeout=60))
+        if isinstance(payload, list):
+            payload = payload[0] if payload else {}
+        if total_pages is None:
+            total_pages = (payload.get("page") or {}).get("totalPages") or 1
+            print(f"    {(payload.get('page') or {}).get('totalRecords')} companies "
+                  f"over {total_pages} pages")
+        for r in payload.get("results", []):
+            ticker_root = (r.get("issuingCompany") or "").strip()
+            rows.append({
+                "country": "BR", "exchange": "B3", "mic": "BVMF",
+                "name": (r.get("companyName") or "").strip(), "isin": "",
+                "isin_country": "", "lei": "",
+                "local_code": (r.get("cnpj") or "").strip(),
+                "ticker": f"{ticker_root}3.SA" if ticker_root else "",
+                "currency": "BRL", "cfi": "",
+                "source": f"B3 GetInitialCompanies (CVM {r.get('codeCVM','')})",
+            })
+        page += 1
+        if page > (total_pages or 1):
+            break
+        time.sleep(0.2)
+    path = os.path.join(out_dir, "universe_b3.csv")
+    _write(path, rows)
+    print(f"  {len(rows):,} companies (ticker root only — B3 appends 3/4/11 "
+          "for ON/PN/UNIT classes)")
     return path
 
 
@@ -351,14 +551,17 @@ def _summarise(rows) -> None:
         print(f"      {label:28s} {len(issuers):>6,}")
 
 
-BUILDERS = {"nse": build_nse, "twse": build_twse, "asx": build_asx, "sec": build_sec}
+BUILDERS = {"nse": build_nse, "twse": build_twse, "asx": build_asx,
+            "sec": build_sec, "six": build_six, "tsx": build_tsx,
+            "hkex": build_hkex, "b3": build_b3}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sources", nargs="+",
-                    choices=["esma", "nse", "twse", "asx", "sec", "all"])
+                    choices=["esma", "nse", "twse", "asx", "sec", "six",
+                             "tsx", "hkex", "b3", "all"])
     ap.add_argument("--out", default="data/universe", help="output directory")
     ap.add_argument("--esma-parts", type=int, default=4,
                     help="how many FULINS_E parts of the newest date to fetch")
