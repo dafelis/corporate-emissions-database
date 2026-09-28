@@ -551,9 +551,132 @@ def _summarise(rows) -> None:
         print(f"      {label:28s} {len(issuers):>6,}")
 
 
+def build_jpx(out_dir: str) -> str:
+    """Tokyo listed issues. The workbook covers ETFs and REITs too."""
+    print("Japan JPX (Tokyo)")
+    data = _get("https://www.jpx.co.jp/markets/statistics-equities/misc/"
+                "tvdivq0000001vg2-att/data_j.xlsx", headers=BROWSER)
+    rows, header = [], None
+    for cells in _xlsx_rows(data):
+        if header is None:
+            header = cells
+            continue
+        if len(cells) < 4:
+            continue
+        code, name, segment = cells[1].strip(), cells[2].strip(), cells[3].strip()
+        if not code.isdigit():
+            continue
+        # 市場・商品区分: keep the equity markets, drop ETF・ETN and REITs.
+        if "内国株式" not in segment and "外国株式" not in segment:
+            continue
+        rows.append({
+            "country": "JP", "exchange": f"Tokyo ({segment})", "mic": "XTKS",
+            "name": name, "isin": "", "isin_country": "", "lei": "",
+            "local_code": code, "ticker": f"{code}.T", "currency": "JPY",
+            "cfi": "", "source": "JPX data_j.xlsx",
+        })
+    path = os.path.join(out_dir, "universe_jpx.csv")
+    _write(path, rows); print(f"  {len(rows):,} companies (ETFs/REITs excluded)")
+    return path
+
+
+def build_krx(out_dir: str) -> str:
+    """Korean listed companies from KIND, the KRX disclosure portal.
+
+    corpList.do is labelled application/vnd.ms-excel but is an EUC-KR HTML
+    table. It covers both KOSPI (유가증권) and KOSDAQ.
+    """
+    print("Korea KRX (via KIND)")
+    raw = _get("https://kind.krx.co.kr/corpgeneral/corpList.do"
+               "?method=download&searchType=13", headers=BROWSER)
+    html = raw.decode("euc-kr", "replace")
+    market_mic = {"유가증권": ("XKRX", "KOSPI", "KS"),
+                  "코스닥": ("XKOS", "KOSDAQ", "KQ"),
+                  "코넥스": ("XKON", "KONEX", "KN")}
+    rows = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+        cells = [re.sub(r"<[^>]+>", "", c).strip()
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
+        if len(cells) < 3 or not re.fullmatch(r"[0-9A-Z]{6}", cells[2] or ""):
+            continue
+        name, market, code = cells[0], cells[1], cells[2]
+        mic, label, suffix = market_mic.get(market, ("XKRX", market, "KS"))
+        rows.append({
+            "country": "KR", "exchange": f"Korea Exchange ({label})", "mic": mic,
+            "name": name, "isin": "", "isin_country": "", "lei": "",
+            "local_code": code, "ticker": f"{code}.{suffix}", "currency": "KRW",
+            "cfi": "", "source": "KIND corpList.do",
+        })
+    path = os.path.join(out_dir, "universe_krx.csv")
+    _write(path, rows); print(f"  {len(rows):,} companies")
+    return path
+
+
+def build_sse(out_dir: str) -> str:
+    """Shanghai listed companies. Needs a Referer; returns the full list at once."""
+    print("Shanghai Stock Exchange")
+    url = ("https://query.sse.com.cn/sseQuery/commonQuery.do"
+           "?sqlId=COMMON_SSE_CP_GPJCTPZ_GPLB_GP_L"
+           "&pageHelp.pageSize=10000&pageHelp.pageNo=1"
+           "&pageHelp.beginPage=1&pageHelp.endPage=1")
+    payload = json.loads(_get(url, headers=dict(BROWSER, Referer="https://www.sse.com.cn/")))
+    rows = []
+    for r in payload.get("result", []):
+        code = (r.get("A_STOCK_CODE") or "").strip()
+        if not code:
+            continue
+        board = (r.get("LIST_BOARD") or "").strip()
+        rows.append({
+            "country": "CN",
+            "exchange": "Shanghai (STAR)" if board == "2" else "Shanghai Stock Exchange",
+            "mic": "XSHG",
+            "name": (r.get("FULL_NAME_IN_ENGLISH") or r.get("COMPANY_ABBR_EN")
+                     or r.get("FULL_NAME") or "").strip(),
+            "isin": "", "isin_country": "", "lei": "",
+            "local_code": code, "ticker": f"{code}.SS", "currency": "CNY",
+            "cfi": "", "source": "SSE commonQuery",
+        })
+    path = os.path.join(out_dir, "universe_sse.csv")
+    _write(path, rows); print(f"  {len(rows):,} companies")
+    return path
+
+
+def build_szse(out_dir: str) -> str:
+    """Shenzhen listed companies.
+
+    szse.cn refused connections outright from a UK/EU egress (empty reply on
+    http, TLS handshake failure on https) — most likely geo-filtering rather
+    than anything about the request. Retry from a different network before
+    concluding it is unavailable.
+    """
+    print("Shenzhen Stock Exchange")
+    url = ("https://www.szse.cn/api/report/ShowReport/data"
+           "?SHOWTYPE=JSON&CATALOGID=1110&TABKEY=tab1&PAGENO=1&PAGESIZE=5000")
+    payload = json.loads(_get(url, headers=dict(
+        BROWSER, Referer="https://www.szse.cn/market/product/stock/list/index.html")))
+    blocks = payload if isinstance(payload, list) else [payload]
+    rows = []
+    for block in blocks:
+        for r in (block.get("data") or []):
+            code = re.sub(r"<[^>]+>", "", str(r.get("zqdm", ""))).strip()
+            name = re.sub(r"<[^>]+>", "", str(r.get("zqjc", ""))).strip()
+            if not code:
+                continue
+            rows.append({
+                "country": "CN", "exchange": "Shenzhen Stock Exchange", "mic": "XSHE",
+                "name": name, "isin": "", "isin_country": "", "lei": "",
+                "local_code": code, "ticker": f"{code}.SZ", "currency": "CNY",
+                "cfi": "", "source": "SZSE ShowReport",
+            })
+    path = os.path.join(out_dir, "universe_szse.csv")
+    _write(path, rows); print(f"  {len(rows):,} companies")
+    return path
+
+
 BUILDERS = {"nse": build_nse, "twse": build_twse, "asx": build_asx,
             "sec": build_sec, "six": build_six, "tsx": build_tsx,
-            "hkex": build_hkex, "b3": build_b3}
+            "hkex": build_hkex, "b3": build_b3, "jpx": build_jpx,
+            "krx": build_krx, "sse": build_sse, "szse": build_szse}
 
 
 def main() -> None:
@@ -561,7 +684,8 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sources", nargs="+",
                     choices=["esma", "nse", "twse", "asx", "sec", "six",
-                             "tsx", "hkex", "b3", "all"])
+                             "tsx", "hkex", "b3", "jpx", "krx", "sse",
+                             "szse", "all"])
     ap.add_argument("--out", default="data/universe", help="output directory")
     ap.add_argument("--esma-parts", type=int, default=4,
                     help="how many FULINS_E parts of the newest date to fetch")
