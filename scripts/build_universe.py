@@ -241,31 +241,38 @@ def build_esma(out_dir: str, parts: int, all_venues: bool = False,
     share classes on one exchange is one company.
     """
     print("ESMA FIRDS (EU/EEA equities)")
-    rows: dict[tuple, dict] = {}
+    rows: dict[str, dict] = {}
     seen_instruments = 0
     for url in esma_latest_files(parts):
         n = 0
         for rec in esma_records(url, cfi_prefix):
             seen_instruments += 1
+            n += 1
             mic = rec.get("mic", "")
-            if mic not in MIC_MAP and not all_venues:
+            mapped = mic in MIC_MAP
+            if all_venues and not mapped:
+                mapped = False
+            issuer = rec.get("lei") or rec["isin"]
+            known = rows.get(issuer)
+            # One row per issuer. A share is admitted on dozens of venues —
+            # MTFs and German regional segments dominate — so a recognised
+            # primary exchange wins if we see one, but an issuer is never
+            # dropped merely because we don't recognise any of its venues.
+            if known is not None and (known["exchange"] or not mapped):
                 continue
             country, exchange = MIC_MAP.get(mic, ("", ""))
-            issuer = rec.get("lei") or rec["isin"]
-            key = (issuer, mic)
-            if key not in rows:
-                rows[key] = {
-                    "country": country, "exchange": exchange, "mic": mic,
-                    "name": rec.get("name", ""), "isin": rec["isin"],
-                    "isin_country": rec.get("isin_country", ""),
-                    "lei": rec.get("lei", ""), "local_code": "",
-                    "ticker": "", "currency": rec.get("currency", ""),
-                    "cfi": rec.get("cfi", ""), "source": "ESMA FIRDS",
-                }
-            n += 1
-        print(f"      {n:,} matching instrument/venue records")
+            rows[issuer] = {
+                "country": country or rec.get("isin_country", ""),
+                "exchange": exchange, "mic": mic,
+                "name": rec.get("name", ""), "isin": rec["isin"],
+                "isin_country": rec.get("isin_country", ""),
+                "lei": rec.get("lei", ""), "local_code": "",
+                "ticker": "", "currency": rec.get("currency", ""),
+                "cfi": rec.get("cfi", ""), "source": "ESMA FIRDS",
+            }
+        print(f"      {n:,} instrument/venue records")
     print(f"  {seen_instruments:,} instrument/venue records seen, "
-          f"{len(rows):,} kept after venue filter and issuer dedupe")
+          f"{len(rows):,} distinct issuers")
     path = os.path.join(out_dir, "universe_esma.csv")
     _write(path, rows.values())
     _summarise(rows.values())
@@ -540,15 +547,25 @@ def _write(path: str, rows) -> None:
     print(f"  -> {path}")
 
 
-def _summarise(rows) -> None:
+def _summarise(rows, min_count: int = 15) -> None:
+    """Issuer counts by country of incorporation (from the ISIN prefix).
+
+    Country is the useful axis for a company universe: venue tells you where
+    a share trades, which for EU-admitted shares is many places at once.
+    """
     rows = list(rows)
-    by_exchange: dict[str, set] = {}
+    by_country: dict[str, set] = {}
     for r in rows:
-        label = r.get("exchange") or r.get("mic") or "(unmapped)"
-        by_exchange.setdefault(label, set()).add(r.get("lei") or r.get("isin"))
-    print("  distinct issuers by listing venue:")
-    for label, issuers in sorted(by_exchange.items(), key=lambda kv: -len(kv[1])):
-        print(f"      {label:28s} {len(issuers):>6,}")
+        cc = r.get("isin_country") or r.get("country") or "??"
+        by_country.setdefault(cc, set()).add(r.get("lei") or r.get("isin"))
+    shown = [(cc, s) for cc, s in by_country.items() if len(s) >= min_count]
+    tail = sum(len(s) for cc, s in by_country.items() if len(s) < min_count)
+    print(f"  distinct issuers by country of incorporation "
+          f"({len(by_country)} countries):")
+    for cc, issuers in sorted(shown, key=lambda kv: -len(kv[1])):
+        print(f"      {cc}  {len(issuers):>6,}")
+    if tail:
+        print(f"      (+{tail:,} in {len(by_country) - len(shown)} smaller countries)")
 
 
 def build_jpx(out_dir: str) -> str:
