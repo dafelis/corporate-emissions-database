@@ -53,6 +53,7 @@ from pipeline.regulatory_filings import (
     find_esef_filings, fetch_esef_report_text, find_ghg_sections,
     find_nsm_annual_reports,
 )
+from pipeline.emissions_structured import TWSE_GHG, TPEX_GHG
 import html as _html
 
 logging.basicConfig(
@@ -1124,6 +1125,71 @@ def _resolve_esef_primaries(session, company, target):
     session.commit()
 
 
+def _run_structured_emissions_tier(
+    company, company_name, session, covered_years, target, events=None,
+):
+    """Tier S: emissions published as data, so nothing needs extracting.
+
+    Currently Taiwan only (TWSE/TPEx statutory GHG datasets). Returns the
+    count saved. Costs no API calls at all.
+    """
+    from pipeline.emissions_structured import taiwan_record_for, describe_taiwan_entry
+
+    entry = taiwan_record_for(company)
+    if not entry:
+        return 0
+    year = entry["reporting_year"]
+    if year not in target:
+        log.info(f"  Tier S: Taiwan data is for {year}, outside the target window")
+        return 0
+    if entry.get("scope_1") is None and entry.get("scope_2_location") is None \
+            and entry.get("scope_3") is None:
+        return 0
+
+    boundary, notes = describe_taiwan_entry(entry)
+    market = entry["market"]
+    source = Source(
+        company_id=company.id,
+        url=TWSE_GHG if market == "TWSE" else TPEX_GHG,
+        title=f"{market} statutory GHG dataset {year} ({entry['company_name']})",
+        document_type="dataset", fetched_at=datetime.utcnow(),
+    )
+    session.add(source)
+    session.flush()
+
+    existing = (session.query(EmissionsRecord)
+                .filter_by(company_id=company.id, reporting_year=year).first())
+    record = existing or EmissionsRecord(
+        company_id=company.id, reporting_year=year, review_status="pending")
+    record.scope_1 = entry.get("scope_1")
+    record.scope_2_location = entry.get("scope_2_location")
+    record.scope_3 = entry.get("scope_3")
+    record.unit = "tonnes CO2e"
+    record.boundary = boundary or None
+    record.methodology_notes = notes
+    record.source_id = source.id
+    # Reported by the company to its exchange under a statutory requirement,
+    # and read as numbers rather than inferred from prose.
+    record.confidence_score = 100
+    record.extraction_date = datetime.utcnow()
+    record.period_start = date_type(year, 1, 1)
+    record.period_end = date_type(year, 12, 31)
+    if existing is None:
+        session.add(record)
+    session.commit()
+    covered_years.add(year)
+
+    verified = sum(1 for f in ("scope_1", "scope_2_location", "scope_3")
+                   if entry.get(f"{f}_verified"))
+    log.info(f"  Tier S {market}: {year} S1={entry.get('scope_1')} "
+             f"S2={entry.get('scope_2_location')} S3={entry.get('scope_3')} "
+             f"({verified}/3 scopes third-party verified)")
+    if events is not None:
+        events.append({"type": "source", "url": source.url,
+                       "title": source.title, "years": {year}})
+    return 1
+
+
 def _run_regulatory_emissions_tier(
     company, company_name, client, session, covered_years, target, events=None,
 ):
@@ -2100,7 +2166,17 @@ def process_company(
         log.info(f"  Emissions: have {sorted(em_pre_existing) or 'none'}, "
                  f"missing {sorted(em_missing)}")
 
-        if REGULATORY_EMISSIONS_ENABLED:
+        # Tier S first: free, structured, no extraction.
+        try:
+            s_saved = _run_structured_emissions_tier(
+                company, company_name, session, em_covered, target, events=events)
+            total_em_saved += s_saved
+            em_missing = target - em_covered
+        except Exception as e:
+            log.warning(f"  Tier S failed: {e}")
+            session.rollback()
+
+        if REGULATORY_EMISSIONS_ENABLED and em_missing:
             try:
                 reg_saved = _run_regulatory_emissions_tier(
                     company, company_name, client, session, em_covered, target,
