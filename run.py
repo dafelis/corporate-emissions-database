@@ -84,6 +84,10 @@ _MIGRATIONS = [
     ("companies", "nace_code", "VARCHAR(20)"),
     ("companies", "nace_description", "VARCHAR(500)"),
     ("companies", "industry_review_status", "VARCHAR(20) DEFAULT 'pending'"),
+    # Companies table — universe provenance
+    ("companies", "isin", "VARCHAR(12)"),
+    ("companies", "country", "VARCHAR(10)"),
+    ("companies", "exchange", "VARCHAR(100)"),
     ("companies", "is_financial_institution", "BOOLEAN"),
     ("companies", "fi_basis", "VARCHAR(200)"),
     # Emissions table — reporting period
@@ -633,6 +637,166 @@ def cmd_reset(args):
     print("Reset complete")
 
 
+# The universe files scripts/build_universe.py writes, and the
+# index_membership tag each one's rows get. The tag is what lets a later run
+# target one market without hunting through ids.
+_UNIVERSE_SOURCES = {
+    "esma": ("universe_esma.csv", "UNIV-EU"),
+    "sec":  ("universe_sec.csv",  "UNIV-US"),
+    "nse":  ("universe_nse.csv",  "UNIV-IN"),
+    "twse": ("universe_twse.csv", "UNIV-TW"),
+    "hkex": ("universe_hkex.csv", "UNIV-HK"),
+    "jpx":  ("universe_jpx.csv",  "UNIV-JP"),
+    "asx":  ("universe_asx.csv",  "UNIV-AU"),
+    "tsx":  ("universe_tsx.csv",  "UNIV-CA"),
+    "b3":   ("universe_b3.csv",   "UNIV-BR"),
+    "sse":  ("universe_sse.csv",  "UNIV-CN"),
+    "szse": ("universe_szse.csv", "UNIV-CNSZ"),
+    "six":  ("universe_six.csv",  "UNIV-CH"),
+    "krx":  ("universe_krx.csv",  "UNIV-KR"),
+}
+
+# Markets whose emissions already come as structured data, so a --free-only
+# run over them actually returns figures rather than nothing.
+_TIER_S_SOURCES = ("twse", "nse")
+
+
+def cmd_load_universe(args):
+    """Load companies from the CSVs that scripts/build_universe.py writes.
+
+    Deliberately does no LEI lookup: outside the UK/EU the LEI is not the
+    key, and resolving tens of thousands of them would take days and mostly
+    fail. Rows keep whatever LEI and ISIN their source supplied, and
+    `run.py lei` can fill gaps later for the markets where it helps.
+    """
+    import csv as _csv
+
+    config = get_config()
+    _run_migrations(config["DATABASE_URL"])
+
+    from db.models import get_session, Company
+
+    if args.sources == "tier-s":
+        keys = list(_TIER_S_SOURCES)
+    elif args.sources == "all":
+        keys = list(_UNIVERSE_SOURCES)
+    else:
+        keys = [k.strip().lower() for k in args.sources.split(",") if k.strip()]
+
+    unknown = [k for k in keys if k not in _UNIVERSE_SOURCES]
+    if unknown:
+        print(f"Unknown source(s): {', '.join(unknown)}")
+        print(f"Known: {', '.join(sorted(_UNIVERSE_SOURCES))} — or 'all' / 'tier-s'")
+        return
+
+    session = get_session(config["DATABASE_URL"])
+
+    # One pass over what is already stored, so re-running is idempotent.
+    seen_tickers, seen_isins, seen_names, used_leis = set(), set(), set(), set()
+    for c in session.query(Company).all():
+        if c.ticker:
+            seen_tickers.add(c.ticker.strip().upper())
+        if getattr(c, "isin", None):
+            seen_isins.add(c.isin.strip().upper())
+        if c.name:
+            seen_names.add(c.name.strip().lower())
+        if c.lei:
+            used_leis.add(c.lei.strip().upper())
+    print(f"Already in database: {len(seen_names):,} companies")
+
+    grand = {"added": 0, "dupe": 0, "no_ticker": 0, "no_name": 0}
+    for key in keys:
+        fname, default_tag = _UNIVERSE_SOURCES[key]
+        path = os.path.join(args.dir, fname)
+        if not os.path.exists(path):
+            print(f"\n{key}: {path} not found — "
+                  f"run scripts/build_universe.py --source {key} first")
+            continue
+        tag = args.tag or default_tag
+
+        with open(path, newline="", encoding="utf-8") as fh:
+            rows = list(_csv.DictReader(fh))
+        if args.limit:
+            rows = rows[:args.limit]
+
+        stats = {"added": 0, "dupe": 0, "no_ticker": 0, "no_name": 0}
+        pending = 0
+        for r in rows:
+            name = (r.get("name") or "").strip()
+            if not name:
+                stats["no_name"] += 1
+                continue
+            ticker = (r.get("ticker") or "").strip().upper()
+            if len(ticker) > 20:
+                ticker = ""
+            isin = (r.get("isin") or "").strip().upper()
+            if args.require_ticker and not ticker:
+                stats["no_ticker"] += 1
+                continue
+
+            # Dedupe on the strongest identifier the row carries. Names are
+            # only used when there is nothing better, since the same company
+            # is spelled differently by different exchanges.
+            if ticker and ticker in seen_tickers:
+                stats["dupe"] += 1
+                continue
+            if isin and isin in seen_isins:
+                stats["dupe"] += 1
+                continue
+            if not ticker and not isin and name.lower() in seen_names:
+                stats["dupe"] += 1
+                continue
+
+            # `lei` is unique, so a blank has to be NULL rather than "", and a
+            # LEI another row already holds has to be dropped instead of
+            # aborting the load.
+            lei = (r.get("lei") or "").strip().upper() or None
+            if lei and lei in used_leis:
+                lei = None
+
+            if not args.dry_run:
+                session.add(Company(
+                    name=name[:500],
+                    ticker=ticker or None,
+                    lei=lei,
+                    isin=isin or None,
+                    country=(r.get("country") or "").strip()[:10] or None,
+                    exchange=(r.get("exchange") or "").strip()[:100] or None,
+                    index_membership=tag,
+                ))
+                pending += 1
+                if pending >= 500:
+                    session.commit()
+                    pending = 0
+
+            if ticker:
+                seen_tickers.add(ticker)
+            if isin:
+                seen_isins.add(isin)
+            if lei:
+                used_leis.add(lei)
+            seen_names.add(name.lower())
+            stats["added"] += 1
+
+        if not args.dry_run and pending:
+            session.commit()
+
+        print(f"\n{key} ({tag}) — {len(rows):,} rows in {fname}")
+        print(f"   added {stats['added']:,}   already present {stats['dupe']:,}"
+              f"   no ticker {stats['no_ticker']:,}   no name {stats['no_name']:,}")
+        for k in grand:
+            grand[k] += stats[k]
+
+    verb = "Would add" if args.dry_run else "Added"
+    print(f"\n{verb} {grand['added']:,} companies "
+          f"({grand['dupe']:,} already present, "
+          f"{grand['no_ticker']:,} skipped for having no ticker)")
+    if args.dry_run:
+        print("Dry run — nothing written.")
+    else:
+        print(f"Database now holds {session.query(Company).count():,} companies")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Corporate Emissions Database Pipeline")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
@@ -642,6 +806,26 @@ def main():
     init_parser.add_argument("--skip-lei", action="store_true", help="Skip LEI lookup")
 
     # extract
+    # load-universe
+    univ_parser = subparsers.add_parser(
+        "load-universe",
+        help="Load companies from the data/universe CSVs (no LEI lookup)")
+    univ_parser.add_argument(
+        "--sources", default="tier-s",
+        help="Comma list of source keys, or 'all', or 'tier-s' (twse,nse — the "
+             "markets whose emissions are free). Default: tier-s")
+    univ_parser.add_argument("--dir", default="data/universe",
+                             help="Directory holding the universe CSVs")
+    univ_parser.add_argument("--tag", default=None,
+                             help="Override index_membership for every loaded row")
+    univ_parser.add_argument("--limit", type=int, default=None,
+                             help="Load at most N rows per source (for testing)")
+    univ_parser.add_argument("--require-ticker", action="store_true",
+                             help="Skip rows with no ticker — they can reach "
+                                  "neither Tier S nor yfinance")
+    univ_parser.add_argument("--dry-run", action="store_true",
+                             help="Report what would be loaded without writing")
+
     extract_parser = subparsers.add_parser("extract", help="Run extraction pipeline")
     extract_parser.add_argument("--id", type=int, help="Process a single company by ID")
     extract_parser.add_argument("--ids", type=str,
@@ -717,6 +901,7 @@ def main():
 
     commands = {
         "init": cmd_init,
+        "load-universe": cmd_load_universe,
         "extract": cmd_extract,
         "lei": cmd_lei,
         "tickers": cmd_tickers,

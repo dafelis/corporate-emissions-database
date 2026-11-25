@@ -27,6 +27,13 @@ class Company(Base):
     lei_review_status = Column(String(20), default="pending")  # pending / approved / rejected
     index_membership = Column(String(50))     # e.g. "FTSE100"
 
+    # Set when loaded from a built universe file. Outside the UK/EU the LEI is
+    # usually absent and the exchange's own identifiers are all there is, so
+    # these are the only keys Tier S and Tier 2 have to work from.
+    isin = Column(String(12), index=True)
+    country = Column(String(10))              # domicile/listing country code
+    exchange = Column(String(100))            # listing venue as named by its source
+
     # Industry classification
     yfinance_sector = Column(String(200))     # sector from yfinance
     yfinance_industry = Column(String(200))   # industry from yfinance
