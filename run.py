@@ -273,6 +273,12 @@ def cmd_extract(args):
     if not tiers or args.tierall:
         tiers = {1, 2, 3}
 
+    # --free-only drops Tier 3, the only financial tier that calls an LLM.
+    if args.free_only:
+        tiers &= {1, 2}
+        print("Free-only mode: Tier S emissions + XBRL/yfinance financials. "
+              "No API spend.")
+
     run = run_pipeline(
         database_url=config["DATABASE_URL"],
         anthropic_key=config["ANTHROPIC_API_KEY"],
@@ -286,6 +292,7 @@ def cmd_extract(args):
         budget_per_company=args.company_budget,
         budget_global=args.budget,
         max_concurrent=args.concurrent,
+        free_only=args.free_only,
     )
 
     print(f"\nPipeline run complete:")
@@ -657,6 +664,11 @@ def main():
                                 help="Global budget cap in USD (default: $20)")
     extract_parser.add_argument("--company-budget", type=float, default=None,
                                 help="Per-company budget cap in USD (default: $5)")
+    extract_parser.add_argument(
+        "--free-only", action="store_true",
+        help="Only run steps that cost nothing: Tier S emissions and the "
+             "XBRL/yfinance financial tiers. Skips the emissions search "
+             "walk, Tier 0, Tier 3 and industry classification.")
     extract_parser.add_argument("--concurrent", type=int, default=4,
                                 help="Max companies to process concurrently (default: 4)")
 

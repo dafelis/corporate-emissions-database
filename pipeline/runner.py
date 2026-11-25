@@ -1130,9 +1130,23 @@ def _run_structured_emissions_tier(
 ):
     """Tier S: emissions published as data, so nothing needs extracting.
 
-    Currently Taiwan only (TWSE/TPEx statutory GHG datasets). Returns the
-    count saved. Costs no API calls at all.
+    Two regimes publish GHG figures as data rather than as a report:
+    Taiwan (TWSE/TPEx statutory datasets) and India (SEBI BRSR XBRL filed
+    with NSE). A company can only sit in one of them, so the first to
+    return anything wins. Returns the count saved, and costs no API calls.
     """
+    saved = _run_taiwan_structured(
+        company, session, covered_years, target, events=events)
+    if saved:
+        return saved
+    return _run_india_structured(
+        company, session, covered_years, target, events=events)
+
+
+def _run_taiwan_structured(
+    company, session, covered_years, target, events=None,
+):
+    """Taiwan's statutory GHG dataset: one year, all three scopes."""
     from pipeline.emissions_structured import taiwan_record_for, describe_taiwan_entry
 
     entry = taiwan_record_for(company)
@@ -1188,6 +1202,76 @@ def _run_structured_emissions_tier(
         events.append({"type": "source", "url": source.url,
                        "title": source.title, "years": {year}})
     return 1
+
+
+def _run_india_structured(
+    company, session, covered_years, target, events=None,
+):
+    """India's BRSR XBRL: Scope 1 and 2, two reporting years per filing.
+
+    Scope 3 is left to the search walk — the BRSR taxonomy carries no
+    value element for it, only a flag saying whether it applies.
+    """
+    from pipeline.emissions_india import india_entries_for, describe_india_entry
+
+    entries, filing = india_entries_for(company)
+    if not entries:
+        return 0
+
+    saved = 0
+    for entry in entries:
+        year = entry["reporting_year"]
+        if year not in target or year in covered_years:
+            continue
+        if entry.get("scope_1") is None and entry.get("scope_2_location") is None:
+            continue
+
+        boundary, notes = describe_india_entry(entry)
+        source = Source(
+            company_id=company.id,
+            url=entry["source_url"],
+            title=(f"SEBI BRSR XBRL {year} "
+                   f"({entry.get('company_name') or company.name})"),
+            document_type="xbrl", fetched_at=datetime.utcnow(),
+        )
+        session.add(source)
+        session.flush()
+
+        existing = (session.query(EmissionsRecord)
+                    .filter_by(company_id=company.id, reporting_year=year).first())
+        record = existing or EmissionsRecord(
+            company_id=company.id, reporting_year=year, review_status="pending")
+        record.scope_1 = entry.get("scope_1")
+        record.scope_2_location = entry.get("scope_2_location")
+        record.scope_3 = None
+        record.unit = "tonnes CO2e"
+        record.boundary = boundary or None
+        record.methodology_notes = notes
+        record.source_id = source.id
+        # Tagged numeric facts in a statutory filing, read as numbers
+        # rather than inferred from prose.
+        record.confidence_score = 100
+        record.extraction_date = datetime.utcnow()
+        record.period_start = entry.get("period_start")
+        record.period_end = entry.get("period_end")
+        if existing is None:
+            session.add(record)
+        session.commit()
+        covered_years.add(year)
+        saved += 1
+
+        log.info(f"  Tier S India: {year} S1={entry.get('scope_1')} "
+                 f"S2={entry.get('scope_2_location')} "
+                 f"(assurance: {entry.get('assurance') or 'none stated'})")
+        if events is not None:
+            events.append({"type": "source", "url": source.url,
+                           "title": source.title, "years": {year}})
+
+    if saved == 0:
+        log.info(f"  Tier S India: filing covers "
+                 f"{sorted(e['reporting_year'] for e in entries)}, "
+                 f"nothing new inside the target window")
+    return saved
 
 
 def _run_regulatory_emissions_tier(
@@ -2121,6 +2205,7 @@ def process_company(
     budget_per_company: float | None = None,
     global_tracker: dict | None = None,
     budget_global: float | None = None,
+    free_only: bool = False,
 ) -> dict:
     """Process a single company: walk backwards from TARGET_END_YEAR to fill gaps.
 
@@ -2176,7 +2261,7 @@ def process_company(
             log.warning(f"  Tier S failed: {e}")
             session.rollback()
 
-        if REGULATORY_EMISSIONS_ENABLED and em_missing:
+        if REGULATORY_EMISSIONS_ENABLED and em_missing and not free_only:
             try:
                 reg_saved = _run_regulatory_emissions_tier(
                     company, company_name, client, session, em_covered, target,
@@ -2195,9 +2280,15 @@ def process_company(
 
         search_count = 0
         consecutive_empty = 0
+        # The search walk is the only paid step in the emissions ladder, so
+        # --free-only stops here with whatever Tier S supplied.
+        max_em_searches = 0 if free_only else MAX_SEARCHES
+        if free_only and em_missing:
+            log.info(f"  Free-only: leaving {sorted(em_missing)} to a later "
+                     f"paid run")
         # Walk backwards: newest year first, then year-1, year-2, ...
         walk_year = TARGET_END_YEAR
-        while walk_year >= TARGET_START_YEAR and search_count < MAX_SEARCHES:
+        while walk_year >= TARGET_START_YEAR and search_count < max_em_searches:
             # Skip years that existed before this run OR were explicitly searched
             if walk_year in em_covered or walk_year in em_searched_years:
                 log.info(f"  Year {walk_year}: already covered, skipping")
@@ -2468,7 +2559,8 @@ def process_company(
 
     # ── PART 4: Industry classification ───────────────────────────────────
 
-    if not has_industry and company.ticker and not skip_financial:
+    # Industry classification is an LLM call, so it waits for a paid run.
+    if not has_industry and company.ticker and not skip_financial and not free_only:
         log.info("  Looking up industry classification...")
         try:
             industry_info = get_industry_info(company.ticker)
@@ -2548,8 +2640,16 @@ def run_pipeline(
     budget_per_company: float | None = None,
     budget_global: float | None = None,
     max_concurrent: int = 1,
+    free_only: bool = False,
 ):
-    """Run the full pipeline across all (or specified) companies."""
+    """Run the full pipeline across all (or specified) companies.
+
+    With free_only, every step that costs an API call is skipped: the
+    emissions search walk, Tier 0 regulatory extraction, Tier 3 financials
+    and industry classification. What remains — Tier S emissions and the
+    XBRL/yfinance financial tiers — is free, so the run has no budget to
+    exceed and can be pointed at the whole universe.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     if budget_per_company is None:
@@ -2595,6 +2695,7 @@ def run_pipeline(
                 budget_per_company=budget_per_company,
                 global_tracker=total_cost,
                 budget_global=budget_global,
+                free_only=free_only,
             )
             thread_session.commit()
             return result

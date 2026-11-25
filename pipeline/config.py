@@ -1,8 +1,11 @@
 """Pipeline configuration — edit these parameters to control search behaviour."""
 
-# Year range to search for emissions and financial data
+# Year range to search for emissions and financial data.
+# TARGET_END_YEAR must reach the latest fiscal year companies have filed for,
+# or those records are silently dropped as "outside the target window" — the
+# Indian BRSR filings are already reporting FY2026 (April 2025–March 2026).
 TARGET_START_YEAR = 2020
-TARGET_END_YEAR = 2025
+TARGET_END_YEAR = 2026
 
 # Max Exa searches per document type (emissions / financials) per company
 MAX_SEARCHES = 10
